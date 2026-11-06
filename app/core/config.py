@@ -44,7 +44,7 @@ class Settings(BaseModel):
     port: int = Field(default=8000, ge=1, le=65535)
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             app_name=_env("app_name", "TaskHub"),
             version=_env("version", "0.1.0"),

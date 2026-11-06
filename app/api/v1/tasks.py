@@ -7,13 +7,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Response, status
 
+from app.core.constants import TASK_NOT_FOUND_DESCRIPTION
 from app.core.deps import TaskServiceDep
 from app.models.task import TaskStatus
 from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-NOT_FOUND_RESPONSE = {404: {"description": "Task not found"}}
+NOT_FOUND_RESPONSE = {404: {"description": TASK_NOT_FOUND_DESCRIPTION}}
 
 
 @router.post(
