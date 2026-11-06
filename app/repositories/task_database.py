@@ -81,7 +81,7 @@ class TaskRepository(BaseRepository[TaskRow]):
             updated_at=task.updated_at,
         )
         self.session.add(row)
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(row)
         return self._domain(row)
 
@@ -110,7 +110,7 @@ class TaskRepository(BaseRepository[TaskRow]):
         row.description = task.description
         row.status = task.status
         row.updated_at = task.updated_at
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(row)
         return self._domain(row)
 
@@ -119,5 +119,5 @@ class TaskRepository(BaseRepository[TaskRow]):
         if row is None:
             return False
         await self.session.delete(row)
-        await self.session.commit()
+        await self.session.flush()
         return True

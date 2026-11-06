@@ -32,6 +32,10 @@ class TaskRepository(Protocol):
 
     async def delete(self, task_id: UUID) -> bool: ...
 
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
 
 class InMemoryTaskRepository:
     """Thread-safe, process-local task store (data is lost on restart)."""
@@ -71,3 +75,9 @@ class InMemoryTaskRepository:
     async def delete(self, task_id: UUID) -> bool:
         with self._lock:
             return self._items.pop(task_id, None) is not None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None

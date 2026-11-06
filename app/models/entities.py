@@ -19,6 +19,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.constants import (
+    DESCRIPTION_MAX_LENGTH,
+    EMAIL_MAX_LENGTH,
+    LABEL_NAME_MAX_LENGTH,
+    NAME_MAX_LENGTH,
+    TITLE_MAX_LENGTH,
+)
 from app.db.base import Base
 from app.models.task import TaskStatus
 
@@ -54,8 +61,10 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(EMAIL_MAX_LENGTH), unique=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
     role: Mapped[UserRole] = mapped_column(
         SAEnum(UserRole, name="user_role"), default=UserRole.MEMBER, nullable=False
     )
@@ -67,24 +76,34 @@ class User(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
     owned_workspaces: Mapped[list[Workspace]] = relationship(
-        back_populates="owner", foreign_keys="Workspace.owner_id"
+        back_populates="owner",
+        foreign_keys="Workspace.owner_id",
+        passive_deletes=True,
     )
     memberships: Mapped[list[WorkspaceMember]] = relationship(back_populates="user")
     assigned_tasks: Mapped[list[Task]] = relationship(
-        back_populates="assignee", foreign_keys="Task.assignee_id"
+        back_populates="assignee",
+        foreign_keys="Task.assignee_id",
+        passive_deletes=True,
     )
     created_tasks: Mapped[list[Task]] = relationship(
-        back_populates="creator", foreign_keys="Task.created_by_id"
+        back_populates="creator",
+        foreign_keys="Task.created_by_id",
+        passive_deletes=True,
     )
-    comments: Mapped[list[Comment]] = relationship(back_populates="author")
+    comments: Mapped[list[Comment]] = relationship(
+        back_populates="author", passive_deletes=True
+    )
 
 
 class Workspace(Base):
     __tablename__ = "workspaces"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
+    owner_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -104,7 +123,7 @@ class WorkspaceMember(Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
     )
     user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     role: Mapped[WorkspaceRole] = mapped_column(
         SAEnum(WorkspaceRole, name="workspace_role"), nullable=False
@@ -121,9 +140,9 @@ class Project(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    name: Mapped[str] = mapped_column(String(NAME_MAX_LENGTH), nullable=False)
     status: Mapped[ProjectStatus] = mapped_column(
         SAEnum(ProjectStatus, name="project_status"),
         default=ProjectStatus.ACTIVE,
@@ -144,10 +163,10 @@ class Task(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    title: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(String(TITLE_MAX_LENGTH), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(DESCRIPTION_MAX_LENGTH))
     status: Mapped[TaskStatus] = mapped_column(
         SAEnum(TaskStatus, name="task_status"),
         default=TaskStatus.TODO,
@@ -159,8 +178,12 @@ class Task(Base):
         nullable=False,
     )
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    assignee_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
-    created_by_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    assignee_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    created_by_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -183,9 +206,9 @@ class Label(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(LABEL_NAME_MAX_LENGTH), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -200,7 +223,7 @@ class TaskLabel(Base):
         ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
     )
     label_id: Mapped[UUID] = mapped_column(
-        ForeignKey("labels.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("labels.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     task: Mapped[Task] = relationship(back_populates="label_links")
     label: Mapped[Label] = relationship(back_populates="task_links")
@@ -211,9 +234,11 @@ class Comment(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     task_id: Mapped[UUID] = mapped_column(
-        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    author_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    author_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

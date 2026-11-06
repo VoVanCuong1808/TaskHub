@@ -15,8 +15,8 @@ class Base(DeclarativeBase):
     """Declarative metadata base."""
 
 
-def make_engine(database_url: str):
-    return create_async_engine(database_url)
+def make_engine(database_url: str, *, echo: bool = False):
+    return create_async_engine(database_url, echo=echo)
 
 
 def make_session_factory(engine):

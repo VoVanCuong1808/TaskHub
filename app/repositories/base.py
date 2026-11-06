@@ -22,15 +22,22 @@ class BaseRepository[Model: Base]:
         )
         return list(result)
 
+    async def commit(self) -> None:
+        await self.session.commit()
+
+    async def rollback(self) -> None:
+        await self.session.rollback()
+
     async def create(self, item: Model) -> Model:
         self.session.add(item)
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(item)
         return item
 
     async def update(self, item: Model) -> Model:
         item = await self.session.merge(item)
-        await self.session.commit()
+        await self.session.flush()
+        await self.session.refresh(item)
         return item
 
     async def delete(self, item_id) -> bool:
@@ -38,7 +45,7 @@ class BaseRepository[Model: Base]:
         if item is None:
             return False
         await self.session.delete(item)
-        await self.session.commit()
+        await self.session.flush()
         return True
 
     async def count(self) -> int:

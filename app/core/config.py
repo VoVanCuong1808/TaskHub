@@ -42,7 +42,8 @@ class Settings(BaseModel):
     api_v1_prefix: str = "/api/v1"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
-    database_url: str = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub"
+    database_url: str = "postgresql+asyncpg://taskhub:taskhub@localhost:5432/taskhub"
+    database_echo: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -56,8 +57,9 @@ class Settings(BaseModel):
             port=_env_int("port", 8000),
             database_url=_env(
                 "database_url",
-                "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub",
+                "postgresql+asyncpg://taskhub:taskhub@localhost:5432/taskhub",
             ),
+            database_echo=_env_bool("database_echo", False),
         )
 
 
