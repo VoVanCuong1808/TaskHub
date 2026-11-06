@@ -15,6 +15,8 @@ from app.schemas.task import TaskCreate, TaskUpdate
 
 
 class TaskService:
+    """Orchestrates domain models; never stores or returns transport schemas."""
+
     def __init__(self, repository: TaskRepository) -> None:
         self._repository = repository
 
@@ -44,9 +46,8 @@ class TaskService:
     def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
         task = self.get(task_id)
         changes = payload.model_dump(exclude_unset=True)
-        for field, value in changes.items():
-            if value is not None:
-                setattr(task, field, value)
+        for attribute, value in changes.items():
+            setattr(task, attribute, value)
         task.touch()
         return self._repository.save(task)
 

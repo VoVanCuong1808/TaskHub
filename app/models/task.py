@@ -6,7 +6,7 @@ Pure Python: no FastAPI / Pydantic imports so the domain stays framework-free.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from uuid import UUID, uuid4
 
@@ -21,7 +21,7 @@ class TaskStatus(str, Enum):
 
 def utc_now() -> datetime:
     """Timezone-aware UTC timestamp (never use naive datetimes)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -29,7 +29,7 @@ class Task:
     """A task aggregate root."""
 
     title: str
-    description: str = ""
+    description: str | None = None
     status: TaskStatus = TaskStatus.TODO
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=utc_now)

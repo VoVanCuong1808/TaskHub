@@ -17,7 +17,7 @@ from app.services.task_service import TaskService
 
 def get_task_repository(request: Request) -> TaskRepository:
     repository = getattr(request.app.state, "task_repository", None)
-    if repository is None:  # pragma: no cover - misconfiguration guard
+    if repository is None:
         raise RuntimeError("task_repository is not configured on app.state")
     return cast(TaskRepository, repository)
 

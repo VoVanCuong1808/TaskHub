@@ -7,8 +7,8 @@ Run with:
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -69,9 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "environment": settings.environment,
         }
 
-    # Versioned canonical surface: /api/v1/tasks
     app.include_router(api_router, prefix=settings.api_v1_prefix)
-    # Short alias: /tasks (hidden from the schema to avoid duplicate operations).
     app.include_router(api_router, include_in_schema=False)
 
     return app
