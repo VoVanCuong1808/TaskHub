@@ -6,20 +6,21 @@ Request-scoped dependencies are built from application singletons stored on
 
 from __future__ import annotations
 
-from typing import Annotated, cast
+from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.repositories.task_repo import TaskRepository
+from app.db.base import get_db
+from app.repositories.task_database import TaskRepository
 from app.services.task_service import TaskService
 
 
-def get_task_repository(request: Request) -> TaskRepository:
-    repository = getattr(request.app.state, "task_repository", None)
-    if repository is None:
-        raise RuntimeError("task_repository is not configured on app.state")
-    return cast(TaskRepository, repository)
+def get_task_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> TaskRepository:
+    return TaskRepository(session)
 
 
 def get_task_service(
