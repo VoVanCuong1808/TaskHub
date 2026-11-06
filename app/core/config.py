@@ -42,6 +42,7 @@ class Settings(BaseModel):
     api_v1_prefix: str = "/api/v1"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    database_url: str = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub"
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -53,6 +54,10 @@ class Settings(BaseModel):
             api_v1_prefix=_env("api_v1_prefix", "/api/v1"),
             host=_env("host", "127.0.0.1"),
             port=_env_int("port", 8000),
+            database_url=_env(
+                "database_url",
+                "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub",
+            ),
         )
 
 

@@ -20,37 +20,37 @@ class TaskService:
     def __init__(self, repository: TaskRepository) -> None:
         self._repository = repository
 
-    def create(self, payload: TaskCreate) -> Task:
+    async def create(self, payload: TaskCreate) -> Task:
         task = Task(
             title=payload.title,
             description=payload.description,
             status=payload.status,
         )
-        return self._repository.add(task)
+        return await self._repository.add(task)
 
-    def list(
+    async def list(
         self,
         *,
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
     ) -> list[Task]:
-        return self._repository.list(status=status, offset=offset, limit=limit)
+        return await self._repository.list(status=status, offset=offset, limit=limit)
 
-    def get(self, task_id: UUID) -> Task:
-        task = self._repository.get(task_id)
+    async def get(self, task_id: UUID) -> Task:
+        task = await self._repository.get(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
         return task
 
-    def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
-        task = self.get(task_id)
+    async def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
+        task = await self.get(task_id)
         changes = payload.model_dump(exclude_unset=True)
         for attribute, value in changes.items():
             setattr(task, attribute, value)
         task.touch()
-        return self._repository.save(task)
+        return await self._repository.save(task)
 
-    def delete(self, task_id: UUID) -> None:
-        if not self._repository.delete(task_id):
+    async def delete(self, task_id: UUID) -> None:
+        if not await self._repository.delete(task_id):
             raise TaskNotFoundError(task_id)

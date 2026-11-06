@@ -16,9 +16,9 @@ from app.models.task import Task, TaskStatus
 class TaskRepository(Protocol):
     """Persistence boundary for :class:`Task` aggregates."""
 
-    def add(self, task: Task) -> Task: ...
+    async def add(self, task: Task) -> Task: ...
 
-    def list(
+    async def list(
         self,
         *,
         status: TaskStatus | None = None,
@@ -26,11 +26,11 @@ class TaskRepository(Protocol):
         limit: int = 100,
     ) -> list[Task]: ...
 
-    def get(self, task_id: UUID) -> Task | None: ...
+    async def get(self, task_id: UUID) -> Task | None: ...
 
-    def save(self, task: Task) -> Task: ...
+    async def save(self, task: Task) -> Task: ...
 
-    def delete(self, task_id: UUID) -> bool: ...
+    async def delete(self, task_id: UUID) -> bool: ...
 
 
 class InMemoryTaskRepository:
@@ -40,12 +40,12 @@ class InMemoryTaskRepository:
         self._items: dict[UUID, Task] = {}
         self._lock = RLock()
 
-    def add(self, task: Task) -> Task:
+    async def add(self, task: Task) -> Task:
         with self._lock:
             self._items[task.id] = task
         return task
 
-    def list(
+    async def list(
         self,
         *,
         status: TaskStatus | None = None,
@@ -59,15 +59,15 @@ class InMemoryTaskRepository:
         items.sort(key=lambda task: task.created_at, reverse=True)
         return items[offset : offset + limit]
 
-    def get(self, task_id: UUID) -> Task | None:
+    async def get(self, task_id: UUID) -> Task | None:
         with self._lock:
             return self._items.get(task_id)
 
-    def save(self, task: Task) -> Task:
+    async def save(self, task: Task) -> Task:
         with self._lock:
             self._items[task.id] = task
         return task
 
-    def delete(self, task_id: UUID) -> bool:
+    async def delete(self, task_id: UUID) -> bool:
         with self._lock:
             return self._items.pop(task_id, None) is not None

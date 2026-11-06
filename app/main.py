@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.core.exceptions import TaskNotFoundError
-from app.repositories.task_repo import InMemoryTaskRepository
+from app.db.base import make_engine, make_session_factory
 
 logger = logging.getLogger("taskhub")
 
@@ -36,7 +36,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.task_repository = InMemoryTaskRepository()
+        app.state.engine = make_engine(settings.database_url)
+        app.state.session_factory = make_session_factory(app.state.engine)
         logger.info(
             "TaskHub starting | env=%s version=%s docs=/docs",
             settings.environment,
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await app.state.engine.dispose()
             logger.info("TaskHub shutting down")
 
     app = FastAPI(
