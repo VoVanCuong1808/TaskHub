@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.constants import (
     DESCRIPTION_MAX_LENGTH,
+    EXPLICIT_NULL_MESSAGE,
     TITLE_MAX_LENGTH,
     TITLE_MIN_LENGTH,
 )
@@ -25,7 +26,7 @@ class TaskPayloadBase(BaseModel):
     def reject_explicit_null(cls, value: object) -> object:
         """Required fields accept "absent" but never a JSON ``null``."""
         if value is None:
-            raise ValueError("must not be null")
+            raise ValueError(EXPLICIT_NULL_MESSAGE)
         return value
 
 
@@ -36,7 +37,11 @@ class TaskCreate(TaskPayloadBase):
 
 
 class TaskUpdate(TaskPayloadBase):
-    """Partial update: only explicitly sent fields are applied."""
+    """Partial update: only explicitly sent fields are applied.
+
+    ``description`` follows JSON Merge Patch semantics: an explicit ``null``
+    clears the value, while omitting the field leaves it unchanged.
+    """
 
     title: str | None = Field(
         default=None, min_length=TITLE_MIN_LENGTH, max_length=TITLE_MAX_LENGTH
@@ -50,7 +55,7 @@ class TaskRead(BaseModel):
 
     id: UUID
     title: str
-    description: str
+    description: str | None
     status: TaskStatus
     created_at: datetime
     updated_at: datetime

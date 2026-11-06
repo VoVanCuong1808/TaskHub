@@ -18,7 +18,7 @@ class TaskService:
     """Orchestrates domain models; never stores or returns transport schemas."""
 
     def __init__(self, repository: TaskRepository) -> None:
-        self.repository = repository
+        self._repository = repository
 
     def create(self, payload: TaskCreate) -> Task:
         task = Task(
@@ -26,7 +26,7 @@ class TaskService:
             description=payload.description,
             status=payload.status,
         )
-        return self.repository.add(task)
+        return self._repository.add(task)
 
     def list(
         self,
@@ -35,10 +35,10 @@ class TaskService:
         offset: int = 0,
         limit: int = 100,
     ) -> list[Task]:
-        return self.repository.list(status=status, offset=offset, limit=limit)
+        return self._repository.list(status=status, offset=offset, limit=limit)
 
     def get(self, task_id: UUID) -> Task:
-        task = self.repository.get(task_id)
+        task = self._repository.get(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
         return task
@@ -46,12 +46,11 @@ class TaskService:
     def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
         task = self.get(task_id)
         changes = payload.model_dump(exclude_unset=True)
-        for field, value in changes.items():
-            if value is not None:
-                setattr(task, field, value)
+        for attribute, value in changes.items():
+            setattr(task, attribute, value)
         task.touch()
-        return self.repository.save(task)
+        return self._repository.save(task)
 
     def delete(self, task_id: UUID) -> None:
-        if not self.repository.delete(task_id):
+        if not self._repository.delete(task_id):
             raise TaskNotFoundError(task_id)

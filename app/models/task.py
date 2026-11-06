@@ -29,7 +29,7 @@ class Task:
     """A task aggregate root."""
 
     title: str
-    description: str = ""
+    description: str | None = None
     status: TaskStatus = TaskStatus.TODO
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=utc_now)
