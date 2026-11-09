@@ -5,18 +5,24 @@ import os
 import subprocess
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
-from app.core.exceptions import TaskNotFoundError
+from app.core.config import Settings
+from app.core.constants import AUTH_INACTIVE_ACCOUNT_MESSAGE
+from app.core.exceptions import AuthenticationError, TaskNotFoundError
+from app.core.security import create_token, hash_password_async
 from app.db.base import Base
 from app.db.legacy_upgrade import upgrade_legacy_schema
 from app.db.seed import (
@@ -25,7 +31,7 @@ from app.db.seed import (
     DEFAULT_WORKSPACE_ID,
     seed_default_data,
 )
-from app.main import integrity_error_response
+from app.main import create_app, integrity_error_response
 from app.models.entities import (
     Comment,
     Label,
@@ -41,6 +47,8 @@ from app.models.entities import (
 from app.models.enums import TaskStatus
 from app.models.task import Task
 from app.repositories.task_database import TaskRepository
+from app.repositories.user_repository import UserRepository
+from app.services.auth_service import AuthService
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_DATABASE_ENV = "TASKHUB_TEST_DATABASE_URL"
@@ -228,10 +236,447 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.engine.dispose()
 
-    async def test_initial_migration_is_single_revision(self) -> None:
+    async def test_initial_migration_remains_base_of_auth_migration(self) -> None:
         scripts = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-        self.assertEqual(len(list(scripts.walk_revisions())), 1)
-        self.assertIsNone(scripts.get_revision("head").down_revision)
+        revisions = list(scripts.walk_revisions())
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(scripts.get_revision("head").down_revision, "552a3882346e")
+        self.assertIsNone(scripts.get_revision("552a3882346e").down_revision)
+
+    async def test_auth_profile_password_rotation_and_persistence(self) -> None:
+        settings = Settings(
+            database_url=self.test_url,
+            jwt_secret_key=SecretStr("day3-test-signing-secret-at-least-32-bytes"),
+            refresh_cookie_secure=False,
+        )
+        app = create_app(settings)
+        email = f"{uuid4().hex}@example.com"
+        password = "  this password keeps surrounding spaces  "
+        with TestClient(app, headers={"Origin": "http://testserver"}) as client:
+            invalid_register = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": email,
+                    "full_name": "User",
+                    "password": "qZ9!",
+                    "role": "admin",
+                },
+            )
+            self.assertEqual(invalid_register.status_code, 422)
+            self.assertNotIn("qZ9!", invalid_register.text)
+            self.assertNotIn("admin", invalid_register.text)
+
+            registered = client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": email.upper(),
+                    "full_name": "  Auth User  ",
+                    "password": password,
+                },
+            )
+            self.assertEqual(registered.status_code, 201)
+            self.assertEqual(registered.json()["email"], email)
+            self.assertEqual(registered.json()["full_name"], "Auth User")
+            self.assertEqual(registered.json()["role"], "member")
+            self.assertNotIn("hashed_password", registered.json())
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/register",
+                    json={
+                        "email": email,
+                        "full_name": "Duplicate",
+                        "password": password,
+                    },
+                ).status_code,
+                409,
+            )
+
+            self.assertEqual(client.get("/api/v1/users/me").status_code, 401)
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/login",
+                    json={"email": email, "password": "wrong password"},
+                ).json()["detail"],
+                "Invalid credentials",
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/login",
+                    json={"email": "nobody@example.com", "password": "wrong password"},
+                ).json()["detail"],
+                "Invalid credentials",
+            )
+            for origin in ("", "null", "https://attacker.example"):
+                rejected = client.post(
+                    "/api/v1/auth/login",
+                    headers={"Origin": origin},
+                    json={"email": email, "password": password},
+                )
+                self.assertEqual(rejected.status_code, 403)
+                self.assertNotIn("set-cookie", rejected.headers)
+
+            logged_in = client.post(
+                "/api/v1/auth/login", json={"email": email, "password": password}
+            )
+            self.assertEqual(logged_in.status_code, 200)
+            pair = logged_in.json()
+            access = pair["access_token"]
+            self.assertNotIn("refresh_token", pair)
+            cookie = client.cookies.get("refresh_token")
+            self.assertTrue(cookie)
+            set_cookie = logged_in.headers["set-cookie"].lower()
+            self.assertIn("httponly", set_cookie)
+            self.assertIn("samesite=lax", set_cookie)
+            self.assertIn("path=/api/v1/auth", set_cookie)
+            self.assertIn("max-age=2592000", set_cookie)
+            self.assertIn(
+                "secure", set_cookie
+            ) if settings.refresh_cookie_secure else self.assertNotIn(
+                "secure", set_cookie
+            )
+            self.assertIn("no-store", logged_in.headers["cache-control"])
+            blocked_refresh = client.post(
+                "/api/v1/auth/refresh", headers={"Origin": "https://attacker.example"}
+            )
+            self.assertEqual(blocked_refresh.status_code, 403)
+            self.assertNotIn("set-cookie", blocked_refresh.headers)
+            self.assertEqual(client.cookies.get("refresh_token"), cookie)
+            headers = {"Authorization": f"Bearer {access}"}
+            self.assertEqual(
+                client.get("/api/v1/users/me", headers=headers).status_code, 200
+            )
+            self.assertEqual(
+                client.get(
+                    "/api/v1/users/me", headers={"Authorization": "Bearer invalid"}
+                ).status_code,
+                401,
+            )
+            client.cookies.clear()
+            expired_cookie, _, _ = create_token(
+                secret=settings.jwt_secret_key.get_secret_value(),
+                subject=uuid4(),
+                token_type="refresh",
+                expires_in=timedelta(seconds=-1),
+            )
+            for bad_cookie in (access, expired_cookie):
+                rejected_cookie = client.post(
+                    "/api/v1/auth/refresh",
+                    headers={"Cookie": f"refresh_token={bad_cookie}"},
+                )
+                self.assertEqual(rejected_cookie.status_code, 401)
+                self.assertNotIn("set-cookie", rejected_cookie.headers)
+            body_fallback = client.post(
+                "/api/v1/auth/refresh", json={"refresh_token": cookie}
+            )
+            self.assertEqual(body_fallback.status_code, 401)
+            client.cookies.set(
+                "refresh_token", cookie, domain="testserver.local", path="/api/v1/auth"
+            )
+            schema = client.get("/openapi.json").json()
+            self.assertIn("HTTPBearer", schema["components"]["securitySchemes"])
+            self.assertEqual(
+                set(schema["components"]["schemas"]["AccessToken"]["properties"]),
+                {"access_token", "token_type"},
+            )
+
+            async with self.session_factory() as session:
+                service = AuthService(
+                    UserRepository(session),
+                    secret=settings.jwt_secret_key.get_secret_value(),
+                    access_minutes=settings.access_token_minutes,
+                    refresh_days=settings.refresh_token_days,
+                )
+                race_token = (await service.login(email, password))["refresh_token"]
+
+            async def refresh_once():
+                async with self.session_factory() as session:
+                    service = AuthService(
+                        UserRepository(session),
+                        secret=settings.jwt_secret_key.get_secret_value(),
+                        access_minutes=settings.access_token_minutes,
+                        refresh_days=settings.refresh_token_days,
+                    )
+                    try:
+                        return await service.refresh(race_token)
+                    except AuthenticationError:
+                        return None
+
+            race_results = await asyncio.gather(refresh_once(), refresh_once())
+            self.assertEqual(sum(result is not None for result in race_results), 1)
+
+            rotated = client.post("/api/v1/auth/refresh")
+            self.assertEqual(rotated.status_code, 200)
+            rotated_cookie = client.cookies.get("refresh_token")
+            self.assertNotEqual(rotated_cookie, cookie)
+            self.assertNotIn("refresh_token", rotated.json())
+            replay = client.post(
+                "/api/v1/auth/refresh", headers={"Cookie": f"refresh_token={cookie}"}
+            )
+            self.assertEqual(replay.status_code, 401)
+            self.assertNotIn("set-cookie", replay.headers)
+            client.cookies.set(
+                "refresh_token",
+                rotated_cookie,
+                domain="testserver.local",
+                path="/api/v1/auth",
+            )
+            logged_out = client.post("/api/v1/auth/logout")
+            self.assertEqual(logged_out.status_code, 204)
+            self.assertIn("max-age=0", logged_out.headers["set-cookie"].lower())
+            self.assertEqual(
+                client.post("/api/v1/auth/refresh").status_code,
+                401,
+            )
+            invalid_logout = client.post("/api/v1/auth/logout")
+            self.assertEqual(invalid_logout.status_code, 401)
+            self.assertIn("max-age=0", invalid_logout.headers["set-cookie"].lower())
+
+            persistent_login_response = client.post(
+                "/api/v1/auth/login", json={"email": email, "password": password}
+            )
+            persistent_login = persistent_login_response.json()
+            persistent_cookie = client.cookies.get("refresh_token")
+
+        with TestClient(
+            create_app(settings), headers={"Origin": "http://testserver"}
+        ) as client:
+            client.cookies.set(
+                "refresh_token",
+                persistent_cookie,
+                domain="testserver.local",
+                path="/api/v1/auth",
+            )
+            after_restart = client.post("/api/v1/auth/refresh")
+            self.assertEqual(after_restart.status_code, 200)
+            access = persistent_login["access_token"]
+            headers = {"Authorization": f"Bearer {access}"}
+
+            forbidden = client.patch(
+                "/api/v1/users/me",
+                headers=headers,
+                json={"role": "admin", "is_active": False},
+            )
+            self.assertEqual(forbidden.status_code, 422)
+            self.assertNotIn("admin", forbidden.text)
+            self.assertEqual(
+                client.patch(
+                    "/api/v1/users/me", headers=headers, json={"full_name": None}
+                ).status_code,
+                422,
+            )
+            updated = client.patch(
+                "/api/v1/users/me",
+                headers=headers,
+                json={"full_name": "Updated User", "email": f"updated-{email}"},
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["full_name"], "Updated User")
+
+            self.assertEqual(
+                client.post(
+                    "/api/v1/users/me/change-password",
+                    headers=headers,
+                    json={
+                        "current_password": "wrong",
+                        "new_password": "new secure password",
+                    },
+                ).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/users/me/change-password",
+                    headers=headers,
+                    json={
+                        "current_password": password,
+                        "new_password": "new secure password",
+                    },
+                ).status_code,
+                204,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/refresh",
+                ).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/login",
+                    json={"email": f"updated-{email}", "password": password},
+                ).status_code,
+                401,
+            )
+            new_login = client.post(
+                "/api/v1/auth/login",
+                json={"email": f"updated-{email}", "password": "new secure password"},
+            )
+            self.assertEqual(new_login.status_code, 200)
+
+        async with self.session_factory() as session:
+            inactive = await session.scalar(
+                select(User).where(User.email == f"updated-{email}")
+            )
+            inactive.is_active = False
+            await session.commit()
+        with TestClient(
+            create_app(settings), headers={"Origin": "http://testserver"}
+        ) as client:
+            inactive_headers = {
+                "Authorization": f"Bearer {new_login.json()['access_token']}"
+            }
+            self.assertEqual(
+                client.get("/api/v1/users/me", headers=inactive_headers).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/auth/login",
+                    json={
+                        "email": f"updated-{email}",
+                        "password": "new secure password",
+                    },
+                ).status_code,
+                401,
+            )
+
+    async def test_user_for_update_refreshes_preloaded_password_hash(self) -> None:
+        user_id = uuid4()
+        async with self.session_factory() as session:
+            session.add(
+                User(
+                    id=user_id,
+                    email=f"{user_id}@example.com",
+                    full_name="Lock Test",
+                    hashed_password="old-hash",
+                )
+            )
+            await session.commit()
+
+        async with self.session_factory() as first, self.session_factory() as second:
+            preloaded = await first.get(User, user_id)
+            current = await UserRepository(second).get_for_update(user_id)
+            current.hashed_password = "new-hash"
+            await second.commit()
+            locked = await UserRepository(first).get_by_email_for_update(
+                f"{user_id}@example.com"
+            )
+            self.assertEqual(preloaded.hashed_password, "new-hash")
+            self.assertEqual(locked.hashed_password, "new-hash")
+            await first.rollback()
+
+    async def test_refresh_session_lock_reloads_committed_revocation(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from app.models.entities import RefreshSession
+
+        user_id = uuid4()
+        jti = str(uuid4())
+        async with self.session_factory() as session:
+            session.add(
+                User(
+                    id=user_id,
+                    email=f"{user_id}@example.com",
+                    full_name="Refresh Lock Test",
+                    hashed_password="unused-hash",
+                )
+            )
+            await session.flush()
+            session.add(
+                RefreshSession(
+                    jti=jti,
+                    user_id=user_id,
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+            await session.commit()
+
+        async with self.session_factory() as first:
+            stale = await first.get(RefreshSession, jti)
+            await first.commit()
+            async with self.session_factory() as second:
+                changed = await UserRepository(second).get_refresh_for_update(jti)
+                changed.revoked_at = datetime.now(UTC)
+                await second.commit()
+            refreshed = await UserRepository(first).get_refresh_for_update(jti)
+            self.assertIsNotNone(stale.revoked_at)
+            self.assertEqual(refreshed.revoked_at, stale.revoked_at)
+            await first.rollback()
+
+    async def test_profile_and_password_changes_recheck_active_under_lock(self) -> None:
+        profile_user_id = uuid4()
+        password_user_id = uuid4()
+        current_password = "known current password"
+        current_hash = await hash_password_async(current_password)
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    User(
+                        id=profile_user_id,
+                        email=f"{profile_user_id}@example.com",
+                        full_name="Active Before Race",
+                        hashed_password="unused-hash",
+                        is_active=True,
+                    ),
+                    User(
+                        id=password_user_id,
+                        email=f"{password_user_id}@example.com",
+                        full_name="Password Race",
+                        hashed_password=current_hash,
+                        is_active=True,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        async with self.session_factory() as profile_request:
+            preloaded = await UserRepository(profile_request).get(profile_user_id)
+            async with self.session_factory() as admin_session:
+                deactivated = await UserRepository(admin_session).get_for_update(
+                    profile_user_id
+                )
+                deactivated.is_active = False
+                await admin_session.commit()
+
+            service = AuthService(
+                UserRepository(profile_request),
+                secret="database-test-signing-secret-at-least-32-bytes",
+                access_minutes=15,
+                refresh_days=30,
+            )
+            with self.assertRaisesRegex(
+                AuthenticationError, AUTH_INACTIVE_ACCOUNT_MESSAGE
+            ):
+                await service.update_profile(preloaded, {"full_name": "Must Not Save"})
+
+        async with self.session_factory() as password_request:
+            preloaded = await UserRepository(password_request).get(password_user_id)
+            async with self.session_factory() as admin_session:
+                deactivated = await UserRepository(admin_session).get_for_update(
+                    password_user_id
+                )
+                deactivated.is_active = False
+                await admin_session.commit()
+            service = AuthService(
+                UserRepository(password_request),
+                secret="database-test-signing-secret-at-least-32-bytes",
+                access_minutes=15,
+                refresh_days=30,
+            )
+            with self.assertRaisesRegex(
+                AuthenticationError, AUTH_INACTIVE_ACCOUNT_MESSAGE
+            ):
+                await service.change_password(
+                    preloaded, current_password, "new password long"
+                )
+
+        async with self.session_factory() as session:
+            profile_saved = await UserRepository(session).get(profile_user_id)
+            password_saved = await UserRepository(session).get(password_user_id)
+            self.assertFalse(profile_saved.is_active)
+            self.assertEqual(profile_saved.full_name, "Active Before Race")
+            self.assertFalse(password_saved.is_active)
+            self.assertEqual(password_saved.full_name, "Password Race")
 
     async def test_migrated_schema_matches_model_metadata(self) -> None:
         async with self.engine.connect() as connection:

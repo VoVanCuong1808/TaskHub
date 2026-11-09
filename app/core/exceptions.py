@@ -10,6 +10,10 @@ from uuid import UUID
 from app.core.constants import TASK_NOT_FOUND_MESSAGE
 
 
+class AuthenticationError(Exception):
+    """Authentication failed or the supplied token is no longer valid."""
+
+
 class TaskNotFoundError(Exception):
     """Raised when a task id does not exist."""
 

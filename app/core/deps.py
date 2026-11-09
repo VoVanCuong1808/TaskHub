@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
+from app.core.constants import AUTH_NOT_AUTHENTICATED_MESSAGE
+from app.core.exceptions import AuthenticationError
 from app.db.base import get_db
 from app.repositories.task_database import TaskRepository
+from app.repositories.user_repository import UserRepository
+from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
 
 
@@ -29,5 +34,45 @@ def get_task_service(
     return TaskService(repository)
 
 
-SettingsDep = Annotated[Settings, Depends(get_settings)]
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
+
+
+def get_app_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_user_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> UserRepository:
+    return UserRepository(session)
+
+
+def get_auth_service(
+    repository: Annotated[UserRepository, Depends(get_user_repository)],
+    settings: SettingsDep,
+) -> AuthService:
+    if settings.jwt_secret_key is None:
+        raise RuntimeError("TASKHUB_JWT_SECRET_KEY must be configured")
+    return AuthService(
+        repository,
+        secret=settings.jwt_secret_key.get_secret_value(),
+        access_minutes=settings.access_token_minutes,
+        refresh_days=settings.refresh_token_days,
+    )
+
+
+AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
+
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    service: AuthServiceDep,
+):
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise AuthenticationError(AUTH_NOT_AUTHENTICATED_MESSAGE)
+    return await service.authenticate_access(credentials.credentials)
