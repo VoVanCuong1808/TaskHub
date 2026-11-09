@@ -2,20 +2,14 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import (
-    Project,
-    ProjectStatus,
-    User,
-    UserRole,
-    Workspace,
-)
-from app.models.entities import (
-    Task as TaskRow,
-)
-from app.models.task import Task, TaskStatus
+from app.core.exceptions import TaskNotFoundError
+from app.db.seed import DEFAULT_PROJECT_ID, DEFAULT_USER_ID
+from app.models.entities import Task as TaskRow
+from app.models.enums import TaskStatus
+from app.models.task import Task
 from app.repositories.base import BaseRepository
 
 
@@ -24,38 +18,6 @@ class TaskRepository(BaseRepository[TaskRow]):
 
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, TaskRow)
-
-    async def _default_project(self) -> tuple[UUID, UUID]:
-        user = await self.session.scalar(
-            select(User).where(User.email == "system@taskhub.local")
-        )
-        if user is None:
-            user = User(
-                email="system@taskhub.local", name="TaskHub System", role=UserRole.ADMIN
-            )
-            self.session.add(user)
-            await self.session.flush()
-        workspace = await self.session.scalar(
-            select(Workspace).where(
-                Workspace.owner_id == user.id, Workspace.name == "Default"
-            )
-        )
-        if workspace is None:
-            workspace = Workspace(name="Default", owner_id=user.id)
-            self.session.add(workspace)
-            await self.session.flush()
-        project = await self.session.scalar(
-            select(Project).where(
-                Project.workspace_id == workspace.id, Project.name == "Default"
-            )
-        )
-        if project is None:
-            project = Project(
-                workspace_id=workspace.id, name="Default", status=ProjectStatus.ACTIVE
-            )
-            self.session.add(project)
-            await self.session.flush()
-        return project.id, user.id
 
     @staticmethod
     def _domain(row: TaskRow) -> Task:
@@ -69,14 +31,13 @@ class TaskRepository(BaseRepository[TaskRow]):
         )
 
     async def add(self, task: Task) -> Task:
-        project_id, user_id = await self._default_project()
         row = TaskRow(
             id=task.id,
-            project_id=project_id,
+            project_id=DEFAULT_PROJECT_ID,
             title=task.title,
             description=task.description,
             status=task.status,
-            created_by_id=user_id,
+            created_by=DEFAULT_USER_ID,
             created_at=task.created_at,
             updated_at=task.updated_at,
         )
@@ -91,21 +52,30 @@ class TaskRepository(BaseRepository[TaskRow]):
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
-    ) -> list[Task]:
-        query = select(TaskRow).order_by(TaskRow.created_at.desc())
+    ) -> tuple[list[Task], int]:
+        query = select(TaskRow).order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
+        count_query = select(func.count()).select_from(TaskRow)
         if status is not None:
             query = query.where(TaskRow.status == status)
+            count_query = count_query.where(TaskRow.status == status)
         rows = await self.session.scalars(query.offset(offset).limit(limit))
-        return [self._domain(row) for row in rows]
+        total = await self.session.scalar(count_query) or 0
+        return [self._domain(row) for row in rows], total
 
     async def get(self, task_id: UUID) -> Task | None:
         row = await super().get(task_id)
         return self._domain(row) if row is not None else None
 
+    async def get_for_update(self, task_id: UUID) -> Task | None:
+        row = await self.session.scalar(
+            select(TaskRow).where(TaskRow.id == task_id).with_for_update()
+        )
+        return self._domain(row) if row is not None else None
+
     async def save(self, task: Task) -> Task:
         row = await super().get(task.id)
         if row is None:
-            return task
+            raise TaskNotFoundError(task.id)
         row.title = task.title
         row.description = task.description
         row.status = task.status

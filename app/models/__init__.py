@@ -1,1 +1,1 @@
-"""Domain models."""
+"""Domain and persistence models."""

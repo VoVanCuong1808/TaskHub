@@ -9,8 +9,8 @@ from fastapi import APIRouter, Query, Response, status
 
 from app.core.constants import TASK_NOT_FOUND_DESCRIPTION
 from app.core.deps import TaskServiceDep
-from app.models.task import TaskStatus
-from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
+from app.models.enums import TaskStatus
+from app.schemas.task import TaskCreate, TaskListRead, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -27,7 +27,7 @@ async def create_task(payload: TaskCreate, service: TaskServiceDep) -> TaskRead:
     return TaskRead.model_validate(await service.create(payload))
 
 
-@router.get("", response_model=list[TaskRead], summary="List tasks")
+@router.get("", response_model=TaskListRead, summary="List tasks")
 async def list_tasks(
     service: TaskServiceDep,
     task_status: Annotated[
@@ -35,9 +35,11 @@ async def list_tasks(
     ] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
-) -> list[TaskRead]:
-    tasks = await service.list(status=task_status, offset=offset, limit=limit)
-    return [TaskRead.model_validate(task) for task in tasks]
+) -> TaskListRead:
+    tasks, total = await service.list(status=task_status, offset=offset, limit=limit)
+    return TaskListRead(
+        items=[TaskRead.model_validate(task) for task in tasks], total=total
+    )
 
 
 @router.get(

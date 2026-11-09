@@ -1,8 +1,4 @@
-"""Repository contract + in-memory implementation.
-
-Swap ``InMemoryTaskRepository`` for a SQL/Redis implementation later without
-touching the service or API layers.
-"""
+"""Repository protocol and in-memory implementation for isolated tests."""
 
 from __future__ import annotations
 
@@ -10,10 +6,11 @@ from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
-from app.models.task import Task, TaskStatus
+from app.models.enums import TaskStatus
+from app.models.task import Task
 
 
-class TaskRepository(Protocol):
+class TaskRepositoryProtocol(Protocol):
     """Persistence boundary for :class:`Task` aggregates."""
 
     async def add(self, task: Task) -> Task: ...
@@ -24,9 +21,11 @@ class TaskRepository(Protocol):
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
-    ) -> list[Task]: ...
+    ) -> tuple[list[Task], int]: ...
 
     async def get(self, task_id: UUID) -> Task | None: ...
+
+    async def get_for_update(self, task_id: UUID) -> Task | None: ...
 
     async def save(self, task: Task) -> Task: ...
 
@@ -55,17 +54,21 @@ class InMemoryTaskRepository:
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
-    ) -> list[Task]:
+    ) -> tuple[list[Task], int]:
         with self._lock:
             items = list(self._items.values())
         if status is not None:
             items = [task for task in items if task.status == status]
         items.sort(key=lambda task: task.created_at, reverse=True)
-        return items[offset : offset + limit]
+        total = len(items)
+        return items[offset : offset + limit], total
 
     async def get(self, task_id: UUID) -> Task | None:
         with self._lock:
             return self._items.get(task_id)
+
+    async def get_for_update(self, task_id: UUID) -> Task | None:
+        return await self.get(task_id)
 
     async def save(self, task: Task) -> Task:
         with self._lock:

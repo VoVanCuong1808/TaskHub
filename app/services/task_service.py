@@ -12,8 +12,9 @@ from typing import TypeVar
 from uuid import UUID
 
 from app.core.exceptions import TaskNotFoundError
-from app.models.task import Task, TaskStatus
-from app.repositories.task_repo import TaskRepository
+from app.models.enums import TaskStatus
+from app.models.task import Task
+from app.repositories.task_repo import TaskRepositoryProtocol
 from app.schemas.task import TaskCreate, TaskUpdate
 
 logger = logging.getLogger("taskhub")
@@ -24,7 +25,7 @@ T = TypeVar("T")
 class TaskService:
     """Orchestrates domain models; never stores or returns transport schemas."""
 
-    def __init__(self, repository: TaskRepository) -> None:
+    def __init__(self, repository: TaskRepositoryProtocol) -> None:
         self._repository = repository
 
     async def _transaction(self, operation: Awaitable[T]) -> T:
@@ -51,7 +52,7 @@ class TaskService:
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
-    ) -> list[Task]:
+    ) -> tuple[list[Task], int]:
         return await self._repository.list(status=status, offset=offset, limit=limit)
 
     async def get(self, task_id: UUID) -> Task:
@@ -61,7 +62,9 @@ class TaskService:
         return task
 
     async def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
-        task = await self.get(task_id)
+        task = await self._repository.get_for_update(task_id)
+        if task is None:
+            raise TaskNotFoundError(task_id)
         changes = payload.model_dump(exclude_unset=True)
         for attribute, value in changes.items():
             setattr(task, attribute, value)

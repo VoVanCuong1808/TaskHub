@@ -7,17 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
 from uuid import UUID, uuid4
 
-
-class TaskStatus(str, Enum):
-    """Allowed lifecycle states for a task."""
-
-    TODO = "todo"
-    IN_PROGRESS = "in_progress"
-    IN_REVIEW = "in_review"
-    DONE = "done"
+from app.models.enums import TaskStatus
 
 
 def utc_now() -> datetime:
