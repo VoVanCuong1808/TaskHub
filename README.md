@@ -13,7 +13,40 @@ Không cần activate virtualenv — mọi thứ chạy qua `uv`.
 ```powershell
 uv python install 3.12
 uv sync
+Copy-Item .env.example .env
+docker run -d --name taskhub-db -e POSTGRES_PASSWORD=taskhub -e POSTGRES_DB=taskhub -p 5432:5432 postgres:16
+uv run alembic upgrade head
 ```
+
+Before starting the app, apply database migrations with `uv run alembic upgrade head`.
+`uv run alembic downgrade base` removes all tables; use it only for a disposable DB.
+
+### Chuyển database Day 2 cũ
+
+Revision duy nhất hiện tại tạo schema theo `day2-brief.md`. Hai revision cũ
+`552a3882346e` và `9e5ac2ec2ba3` không nằm trong migration graph mới. Để chuyển
+database có dữ liệu, dừng ứng dụng và tạo backup đã kiểm tra trước. Chạy preflight
+(không ghi dữ liệu), sau đó mới chạy lệnh `--apply` rõ ràng:
+
+```powershell
+$url = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub_test"
+uv run python -m scripts.upgrade_day2_legacy --database-url $url
+uv run python -m scripts.upgrade_day2_legacy --database-url $url --apply
+uv run alembic current
+```
+
+Lệnh mặc định chỉ đọc; tool yêu cầu URL tường minh và từ chối database không có
+hậu tố `_test` nếu thiếu `--allow-non-test-database`. Chỉ dùng cờ đó sau khi đã
+backup và xác nhận URL đích. Chuyển đổi nằm trong một transaction và giữ dữ liệu:
+đổi tên `name`, `created_by_id`, `body`; thêm description, password hash vô hiệu,
+màu mặc định và timestamps; label được gắn với project duy nhất trong workspace.
+Nếu workspace của label có 0 hoặc nhiều hơn 1 project, preflight dừng trước khi
+ghi. Các enum cũ được giữ nguyên; không tự drop type vì chúng có thể còn được
+dùng. Lệnh không chạy tự động khi khởi động ứng dụng.
+
+Nếu không thể dùng utility, cách duy nhất được hỗ trợ là backup dữ liệu, xác nhận
+đích rõ ràng, tạo database rỗng mới và chạy revision ban đầu; không chạy
+`alembic downgrade base` trên database có dữ liệu vì thao tác đó xóa bảng.
 
 ## Chạy server
 
@@ -32,7 +65,7 @@ Canonical: `/api/v1/tasks`. Alias ngắn `/tasks` cũng hoạt động (ẩn kh�
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
 | POST   | `/api/v1/tasks`       | 201    | Tạo task                      |
-| GET    | `/api/v1/tasks`       | 200    | Danh sách (`status`, `offset`, `limit`) |
+| GET    | `/api/v1/tasks`       | 200    | Danh sách và `total` (`status`, `offset`, `limit`) |
 | GET    | `/api/v1/tasks/{id}`  | 200/404| Chi tiết                      |
 | PATCH  | `/api/v1/tasks/{id}`  | 200/404| Cập nhật một phần             |
 | DELETE | `/api/v1/tasks/{id}`  | 204/404| Xoá                           |
@@ -63,6 +96,22 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`:
 | `TASKHUB_API_V1_PREFIX`| `/api/v1`   |
 | `TASKHUB_HOST`         | `127.0.0.1` |
 | `TASKHUB_PORT`         | `8000`      |
+| `TASKHUB_DATABASE_URL` | `postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub` |
+| `TASKHUB_DATABASE_ECHO` | `false` |
+
+## Kiểm thử database
+
+Integration tests chỉ chạy trên PostgreSQL database riêng tên `taskhub_test`.
+Tạo database test rồi chạy:
+
+```powershell
+docker exec taskhub-db createdb -U postgres taskhub_test
+$env:TASKHUB_TEST_DATABASE_URL = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub_test"
+uv run python -m unittest discover -s tests -v
+```
+
+Test migration chạy `downgrade base` rồi `upgrade head`; sau test sẽ downgrade về `base`.
+Không đặt `TASKHUB_TEST_DATABASE_URL` trỏ vào database ứng dụng.
 
 ## Cấu trúc
 
@@ -78,6 +127,8 @@ taskhub/
 │   │   ├── deps.py              # DI: repository → service
 │   │   └── exceptions.py        # TaskNotFoundError
 │   ├── models/task.py           # dataclass slots, UUID, UTC
+│   ├── models/entities.py       # SQLAlchemy tables and relationships
+│   ├── db/                      # async engine and startup seed
 │   ├── schemas/task.py          # Pydantic v2 Create/Update/Read
 │   ├── services/task_service.py # business rules
 │   └── repositories/task_repo.py# Protocol + in-memory impl
@@ -88,7 +139,7 @@ taskhub/
 
 ## Ghi chú thiết kế
 
-- Repository là in-memory, thread-safe (RLock); thay bằng DB chỉ cần implement lại `TaskRepository`.
+- Repository SQLAlchemy async persist vào PostgreSQL; `InMemoryTaskRepository` vẫn có thể dùng trong unit test.
 - Service không import FastAPI → dễ unit test, dễ tái sử dụng.
 - `TaskNotFoundError` được dịch thành HTTP 404 tại composition root (`app/main.py`).
 - Timestamp luôn timezone-aware UTC.

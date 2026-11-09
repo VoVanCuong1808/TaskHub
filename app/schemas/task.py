@@ -13,7 +13,7 @@ from app.core.constants import (
     TITLE_MAX_LENGTH,
     TITLE_MIN_LENGTH,
 )
-from app.models.task import TaskStatus
+from app.models.enums import TaskStatus
 
 
 class TaskPayloadBase(BaseModel):
@@ -59,3 +59,8 @@ class TaskRead(BaseModel):
     status: TaskStatus
     created_at: datetime
     updated_at: datetime
+
+
+class TaskListRead(BaseModel):
+    items: list[TaskRead]
+    total: int

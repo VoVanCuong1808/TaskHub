@@ -9,8 +9,8 @@ from fastapi import APIRouter, Query, Response, status
 
 from app.core.constants import TASK_NOT_FOUND_DESCRIPTION
 from app.core.deps import TaskServiceDep
-from app.models.task import TaskStatus
-from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
+from app.models.enums import TaskStatus
+from app.schemas.task import TaskCreate, TaskListRead, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -23,21 +23,23 @@ NOT_FOUND_RESPONSE = {404: {"description": TASK_NOT_FOUND_DESCRIPTION}}
     status_code=status.HTTP_201_CREATED,
     summary="Create a task",
 )
-def create_task(payload: TaskCreate, service: TaskServiceDep) -> TaskRead:
-    return TaskRead.model_validate(service.create(payload))
+async def create_task(payload: TaskCreate, service: TaskServiceDep) -> TaskRead:
+    return TaskRead.model_validate(await service.create(payload))
 
 
-@router.get("", response_model=list[TaskRead], summary="List tasks")
-def list_tasks(
+@router.get("", response_model=TaskListRead, summary="List tasks")
+async def list_tasks(
     service: TaskServiceDep,
     task_status: Annotated[
         TaskStatus | None, Query(alias="status", description="Filter by status")
     ] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
-) -> list[TaskRead]:
-    tasks = service.list(status=task_status, offset=offset, limit=limit)
-    return [TaskRead.model_validate(task) for task in tasks]
+) -> TaskListRead:
+    tasks, total = await service.list(status=task_status, offset=offset, limit=limit)
+    return TaskListRead(
+        items=[TaskRead.model_validate(task) for task in tasks], total=total
+    )
 
 
 @router.get(
@@ -46,8 +48,8 @@ def list_tasks(
     responses=NOT_FOUND_RESPONSE,
     summary="Get a task",
 )
-def get_task(task_id: UUID, service: TaskServiceDep) -> TaskRead:
-    return TaskRead.model_validate(service.get(task_id))
+async def get_task(task_id: UUID, service: TaskServiceDep) -> TaskRead:
+    return TaskRead.model_validate(await service.get(task_id))
 
 
 @router.patch(
@@ -56,10 +58,10 @@ def get_task(task_id: UUID, service: TaskServiceDep) -> TaskRead:
     responses=NOT_FOUND_RESPONSE,
     summary="Partially update a task",
 )
-def update_task(
+async def update_task(
     task_id: UUID, payload: TaskUpdate, service: TaskServiceDep
 ) -> TaskRead:
-    return TaskRead.model_validate(service.update(task_id, payload))
+    return TaskRead.model_validate(await service.update(task_id, payload))
 
 
 @router.delete(
@@ -68,6 +70,6 @@ def update_task(
     responses=NOT_FOUND_RESPONSE,
     summary="Delete a task",
 )
-def delete_task(task_id: UUID, service: TaskServiceDep) -> Response:
-    service.delete(task_id)
+async def delete_task(task_id: UUID, service: TaskServiceDep) -> Response:
+    await service.delete(task_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
