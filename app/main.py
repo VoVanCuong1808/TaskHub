@@ -11,10 +11,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from app.api.v1.auth import authentication_error_response
 from app.api.v1.router import api_router
+from app.api.v1.tasks import router as tasks_router
 from app.core.config import Settings, get_settings
 from app.core.constants import (
     INTEGRITY_CONFLICT_MESSAGE,
@@ -23,7 +27,7 @@ from app.core.constants import (
     INTEGRITY_REQUIRED_MESSAGE,
     INTEGRITY_RESTRICTED_MESSAGE,
 )
-from app.core.exceptions import TaskNotFoundError
+from app.core.exceptions import AuthenticationError, TaskNotFoundError
 from app.db.base import make_engine, make_session_factory
 from app.db.seed import seed_default_data
 
@@ -56,7 +60,6 @@ def _configure_logging(settings: Settings) -> None:
 
 
 def integrity_error_response(request: Request, exc: IntegrityError) -> JSONResponse:
-    detail = str(exc.orig)
     sqlstate = _postgres_error_attribute(exc.orig, "sqlstate") or (
         _postgres_error_attribute(exc.orig, "pgcode")
     )
@@ -65,7 +68,7 @@ def integrity_error_response(request: Request, exc: IntegrityError) -> JSONRespo
         exc.statement and exc.statement.lstrip().upper().startswith("DELETE")
     )
     if sqlstate == "23505":
-        logger.warning("Integrity conflict on %s: %s", request.url.path, detail)
+        logger.warning("Integrity conflict on %s", request.url.path)
         return JSONResponse(
             status_code=409, content={"detail": INTEGRITY_CONFLICT_MESSAGE}
         )
@@ -74,24 +77,20 @@ def integrity_error_response(request: Request, exc: IntegrityError) -> JSONRespo
         and is_delete
         and constraint_name in RESTRICTED_DELETE_CONSTRAINTS
     ):
-        logger.warning("Delete restricted on %s: %s", request.url.path, detail)
+        logger.warning("Delete restricted on %s", request.url.path)
         return JSONResponse(
             status_code=409, content={"detail": INTEGRITY_RESTRICTED_MESSAGE}
         )
     if sqlstate == "23503":
-        logger.warning("Invalid reference on %s: %s", request.url.path, detail)
+        logger.warning("Invalid reference on %s", request.url.path)
         return JSONResponse(
             status_code=422, content={"detail": INTEGRITY_REFERENCE_MESSAGE}
         )
     if sqlstate == "23502":
-        logger.warning(
-            "Missing required database value on %s: %s", request.url.path, detail
-        )
+        logger.warning("Missing required database value on %s", request.url.path)
         message = INTEGRITY_REQUIRED_MESSAGE
     else:
-        logger.warning(
-            "Invalid database constraint on %s: %s", request.url.path, detail
-        )
+        logger.warning("Invalid database constraint on %s", request.url.path)
         message = INTEGRITY_INVALID_MESSAGE
     return JSONResponse(status_code=422, content={"detail": message})
 
@@ -103,6 +102,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        secret = settings.jwt_secret_key
+        if secret is None:
+            raise RuntimeError("TASKHUB_JWT_SECRET_KEY must be configured")
         app.state.engine = make_engine(
             settings.database_url, echo=settings.database_echo
         )
@@ -125,12 +127,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Layered FastAPI skeleton: api -> services -> repositories.",
         lifespan=lifespan,
     )
+    app.state.settings = settings
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.frontend_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
     @app.exception_handler(TaskNotFoundError)
     async def task_not_found_handler(
         request: Request, exc: TaskNotFoundError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(AuthenticationError)
+    async def authentication_error_handler(
+        request: Request, exc: AuthenticationError
+    ) -> JSONResponse:
+        return authentication_error_response(exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {key: error[key] for key in ("loc", "msg", "type") if key in error}
+                    for error in exc.errors()
+                ]
+            },
+        )
 
     @app.exception_handler(IntegrityError)
     async def integrity_error_handler(
@@ -148,7 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     app.include_router(api_router, prefix=settings.api_v1_prefix)
-    app.include_router(api_router, include_in_schema=False)
+    app.include_router(tasks_router, include_in_schema=False)
 
     return app
 

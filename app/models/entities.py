@@ -26,6 +26,7 @@ from app.core.constants import (
     NAME_MAX_LENGTH,
     PASSWORD_HASH_MAX_LENGTH,
     PROJECT_DESCRIPTION_MAX_LENGTH,
+    REFRESH_TOKEN_ID_MAX_LENGTH,
     TITLE_MAX_LENGTH,
 )
 from app.db.base import Base
@@ -80,6 +81,24 @@ class User(Base):
     )
     comments: Mapped[list[Comment]] = relationship(
         back_populates="author", passive_deletes=True
+    )
+
+
+class RefreshSession(Base):
+    __tablename__ = "refresh_sessions"
+
+    jti: Mapped[str] = mapped_column(
+        String(REFRESH_TOKEN_ID_MAX_LENGTH), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
     )
 
 
