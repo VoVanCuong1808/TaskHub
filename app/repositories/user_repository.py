@@ -29,14 +29,6 @@ class UserRepository:
             .execution_options(populate_existing=True)
         )
 
-    async def get_by_email_for_update(self, email: str) -> User | None:
-        return await self._session.scalar(
-            select(User)
-            .where(User.email == email)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-
     async def get_by_email(self, email: str) -> User | None:
         return await self._session.scalar(select(User).where(User.email == email))
 

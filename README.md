@@ -87,12 +87,10 @@ tokens; access token đã phát hành còn hiệu lực tới khi hết hạn. T
 vẫn public; dự kiến Day 4 sẽ yêu cầu Bearer token và kiểm tra quyền theo
 workspace/project khi phần authorization đó được triển khai.
 
-Ví dụ browser tối giản nằm ở `examples/auth-client.js`: access token được lưu
-trong `localStorage`; refresh token không thể đọc từ JavaScript. `localStorage`
-chịu rủi ro nếu ứng dụng có XSS, nên chỉ lưu access token ngắn hạn và triển khai
-trên HTTPS. Với frontend khác origin, cấu hình origin chính xác, ví dụ
-`TASKHUB_FRONTEND_ORIGINS='["https://app.example.com"]'`. Cookie cross-origin cần
-cùng site (cùng eTLD+1); `SameSite=None` chỉ dùng cùng với Secure và HTTPS.
+Browser integration được hoãn tới Day 4. Với frontend khác origin, cấu hình
+origin chính xác, ví dụ `TASKHUB_FRONTEND_ORIGINS='["https://app.example.com"]'`.
+Cookie cross-origin cần cùng site (cùng eTLD+1); `SameSite=None` chỉ dùng cùng
+với Secure và HTTPS.
 
 Trong PowerShell local HTTP, có thể opt out Secure rõ ràng:
 
@@ -103,15 +101,6 @@ $env:TASKHUB_REFRESH_COOKIE_SECURE = "false"
 SDK/curl có thể bỏ `Origin` khi login; refresh/logout cần gửi `Origin` hợp lệ, ví dụ
 `Origin: http://127.0.0.1:8000`. Cookie refresh được browser gửi tự động; API
 không nhận refresh token trong JSON hoặc Authorization header.
-
-```js
-import { createAuthClient } from "./examples/auth-client.js";
-const auth = createAuthClient({ baseUrl: "https://api.example.com/api/v1" });
-await auth.login(email, password);
-const response = await auth.request("/users/me");
-```
-Auth mutation được xếp hàng và refresh được single-flight trong một tab; ví dụ
-không đồng bộ token giữa nhiều tab.
 
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
@@ -193,7 +182,6 @@ taskhub/
 │   ├── services/                # task and auth business rules
 │   └── main.py                  # app factory, middleware, exception handlers
 ├── alembic/versions/            # schema migrations
-├── examples/auth-client.js      # browser access-token client
 ├── tests/                       # unit and PostgreSQL integration tests
 ├── pyproject.toml
 ├── .python-version

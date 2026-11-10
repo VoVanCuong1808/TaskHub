@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from app.api.v1.auth import _clear_refresh_cookie
+from app.api.v1.auth import authentication_error_response
 from app.api.v1.router import api_router
 from app.api.v1.tasks import router as tasks_router
 from app.core.config import Settings, get_settings
@@ -146,16 +146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def authentication_error_handler(
         request: Request, exc: AuthenticationError
     ) -> JSONResponse:
-        response = JSONResponse(
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-            content={"detail": str(exc)},
-        )
-        if request.url.path == f"{settings.api_v1_prefix.rstrip('/')}/auth/logout":
-            _clear_refresh_cookie(response, settings)
-            response.headers["Cache-Control"] = "no-store"
-            response.headers["Pragma"] = "no-cache"
-        return response
+        return authentication_error_response(exc)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(

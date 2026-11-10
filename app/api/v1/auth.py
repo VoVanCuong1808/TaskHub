@@ -4,6 +4,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
 from app.core.constants import (
@@ -92,6 +93,14 @@ def _access_response(pair: dict[str, str], response: Response) -> AccessToken:
     return AccessToken(access_token=pair["access_token"])
 
 
+def authentication_error_response(exc: AuthenticationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        headers={"WWW-Authenticate": "Bearer"},
+        content={"detail": str(exc)},
+    )
+
+
 @router.post(
     "/register",
     response_model=UserRead,
@@ -162,9 +171,16 @@ async def logout(
     settings: SettingsDep,
     refresh_token: Annotated[str | None, Cookie()] = None,
 ) -> Response:
-    if not refresh_token:
-        raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
-    await service.logout(refresh_token)
+    try:
+        if not refresh_token:
+            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
+        await service.logout(refresh_token)
+    except AuthenticationError as exc:
+        error_response = authentication_error_response(exc)
+        _clear_refresh_cookie(error_response, settings)
+        error_response.headers["Cache-Control"] = "no-store"
+        error_response.headers["Pragma"] = "no-cache"
+        return error_response
     response.status_code = status.HTTP_204_NO_CONTENT
     _clear_refresh_cookie(response, settings)
     response.headers["Cache-Control"] = "no-store"

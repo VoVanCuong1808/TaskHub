@@ -667,31 +667,6 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIsNone(remaining.revoked_at)
 
-    async def test_user_for_update_refreshes_preloaded_password_hash(self) -> None:
-        user_id = uuid4()
-        async with self.session_factory() as session:
-            session.add(
-                User(
-                    id=user_id,
-                    email=f"{user_id}@example.com",
-                    full_name="Lock Test",
-                    hashed_password="old-hash",
-                )
-            )
-            await session.commit()
-
-        async with self.session_factory() as first, self.session_factory() as second:
-            preloaded = await first.get(User, user_id)
-            current = await UserRepository(second).get_for_update(user_id)
-            current.hashed_password = "new-hash"
-            await second.commit()
-            locked = await UserRepository(first).get_by_email_for_update(
-                f"{user_id}@example.com"
-            )
-            self.assertEqual(preloaded.hashed_password, "new-hash")
-            self.assertEqual(locked.hashed_password, "new-hash")
-            await first.rollback()
-
     async def test_refresh_session_lock_reloads_committed_revocation(self) -> None:
         from datetime import UTC, datetime, timedelta
 
