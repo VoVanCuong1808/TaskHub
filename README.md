@@ -72,13 +72,20 @@ Auth: `POST /api/v1/auth/register`, `/login`, `/refresh`, `/logout`;
 `GET/PATCH /api/v1/users/me`; `POST /api/v1/users/me/change-password`.
 Access tokens dùng Bearer auth; refresh token chỉ nằm trong cookie HttpOnly,
 host-only, `Secure`, `SameSite=Lax` mặc định và giới hạn ở `/api/v1/auth`.
-Login/refresh/logout yêu cầu `Origin` đúng origin API hoặc một origin trong
-`TASKHUB_FRONTEND_ORIGINS`; CORS credentials chỉ bật cho danh sách origin tường
-minh này. Refresh tokens được xoay vòng và lưu trạng thái thu hồi trong PostgreSQL.
+Login chấp nhận client không gửi `Origin` như curl, Postman hoặc mobile; nếu header
+được gửi, API kiểm tra origin phải trùng origin API hoặc một origin trong
+`TASKHUB_FRONTEND_ORIGINS`. Refresh/logout luôn yêu cầu `Origin` hợp lệ vì dùng
+refresh cookie. CORS credentials chỉ bật cho danh sách origin tường minh này.
+Refresh tokens được xoay vòng và lưu trạng thái thu hồi trong PostgreSQL. Nếu một
+refresh token còn hạn đã bị thu hồi được dùng lại, API thu hồi toàn bộ refresh
+session của tài khoản. Vì vậy refresh đồng thời ở nhiều tab có thể khiến một
+tab dùng lại token cũ và đăng xuất các tab/thiết bị còn lại; ứng dụng browser nên
+single-flight refresh và tuần tự hóa các thao tác auth giữa các tab.
 Đăng ký luôn cấp role `member`; profile không cho sửa
 role, trạng thái hoạt động hoặc mật khẩu. Logout và đổi mật khẩu thu hồi refresh
-tokens; access token đã phát hành còn hiệu lực tới khi hết hạn. RBAC theo workspace
-và quyền sở hữu task thuộc các bước sau.
+tokens; access token đã phát hành còn hiệu lực tới khi hết hạn. Task endpoints hiện
+vẫn public; dự kiến Day 4 sẽ yêu cầu Bearer token và kiểm tra quyền theo
+workspace/project khi phần authorization đó được triển khai.
 
 Ví dụ browser tối giản nằm ở `examples/auth-client.js`: access token được lưu
 trong `localStorage`; refresh token không thể đọc từ JavaScript. `localStorage`
@@ -93,7 +100,7 @@ Trong PowerShell local HTTP, có thể opt out Secure rõ ràng:
 $env:TASKHUB_REFRESH_COOKIE_SECURE = "false"
 ```
 
-SDK/curl cần gửi `Origin` khi gọi login/refresh/logout, ví dụ
+SDK/curl có thể bỏ `Origin` khi login; refresh/logout cần gửi `Origin` hợp lệ, ví dụ
 `Origin: http://127.0.0.1:8000`. Cookie refresh được browser gửi tự động; API
 không nhận refresh token trong JSON hoặc Authorization header.
 
@@ -176,13 +183,14 @@ taskhub/
 │   ├── core/
 │   │   ├── config.py            # Settings (env TASKHUB_*)
 │   │   ├── deps.py              # request-scoped dependency wiring
-│   │   └── security.py          # password hashing and JWT validation
+│   │   ├── constants.py         # shared validation and error constants
 │   │   ├── exceptions.py        # application/domain exceptions
-│   ├── models/                  # SQLAlchemy entities and task domain model
+│   │   └── security.py          # password hashing and JWT validation
+│   ├── db/                      # engine, metadata, seed, legacy utility
+│   ├── models/                  # entities, enums, and task domain model
 │   ├── repositories/            # PostgreSQL task and user persistence
-│   ├── schemas/                 # Pydantic request and response models
+│   ├── schemas/                 # Pydantic request, response, and shared types
 │   ├── services/                # task and auth business rules
-│   ├── db/                      # async engine and startup seed
 │   └── main.py                  # app factory, middleware, exception handlers
 ├── alembic/versions/            # schema migrations
 ├── examples/auth-client.js      # browser access-token client

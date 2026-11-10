@@ -16,6 +16,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import AuthenticationError
 from app.core.security import (
+    TokenType,
     create_token,
     decode_token,
     hash_password_async,
@@ -52,25 +53,32 @@ class AuthService:
             await self._repository.rollback()
             raise
 
-    def _token_pair(self, user: User) -> dict[str, str]:
+    async def _issue_tokens(self, user: User) -> dict[str, str]:
         access, _, _ = create_token(
             secret=self._secret,
             subject=user.id,
-            token_type="access",
+            token_type=TokenType.ACCESS,
             expires_in=timedelta(minutes=self._access_minutes),
         )
         refresh, jti, expires = create_token(
             secret=self._secret,
             subject=user.id,
-            token_type="refresh",
+            token_type=TokenType.REFRESH,
             expires_in=timedelta(days=self._refresh_days),
         )
-        return {
-            "access_token": access,
-            "refresh_token": refresh,
-            "jti": jti,
-            "expires": expires.isoformat(),
-        }
+        await self._repository.add_refresh(
+            RefreshSession(jti=jti, user_id=user.id, expires_at=expires)
+        )
+        return {"access_token": access, "refresh_token": refresh}
+
+    def _decode_refresh_token(self, token: str) -> dict[str, object]:
+        try:
+            claims = decode_token(token, self._secret)
+        except ValueError:
+            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE) from None
+        if claims["type"] != TokenType.REFRESH.value:
+            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
+        return claims
 
     async def register(self, email: str, full_name: str, password: str) -> User:
         async with self._transaction():
@@ -85,32 +93,30 @@ class AuthService:
         return user
 
     async def login(self, email: str, password: str) -> dict[str, str]:
+        normalized_email = email.lower()
+        user = await self._repository.get_by_email(normalized_email)
+        password_matches = await verify_password_async(
+            password, user.hashed_password if user is not None else None
+        )
+        if user is None or not user.is_active or not password_matches:
+            raise AuthenticationError(AUTH_INVALID_CREDENTIALS_MESSAGE)
+        verified_password_hash = user.hashed_password
         async with self._transaction():
-            user = await self._repository.get_by_email_for_update(email.lower())
-            password_matches = await verify_password_async(
-                password, user.hashed_password if user is not None else None
-            )
-            if user is None or not user.is_active or not password_matches:
+            locked_user = await self._repository.get_for_update(user.id)
+            if (
+                locked_user is None
+                or not locked_user.is_active
+                or locked_user.email != normalized_email
+                or locked_user.hashed_password != verified_password_hash
+            ):
                 raise AuthenticationError(AUTH_INVALID_CREDENTIALS_MESSAGE)
-            pair = self._token_pair(user)
-            claims = decode_token(pair["refresh_token"], self._secret)
-            await self._repository.add_refresh(
-                RefreshSession(
-                    jti=pair["jti"],
-                    user_id=user.id,
-                    expires_at=datetime.fromtimestamp(int(claims["exp"]), UTC),
-                )
-            )
-            tokens = {
-                "access_token": pair["access_token"],
-                "refresh_token": pair["refresh_token"],
-            }
+            tokens = await self._issue_tokens(locked_user)
         return tokens
 
     async def authenticate_access(self, token: str) -> User:
         try:
             claims = decode_token(token, self._secret)
-            if claims["type"] != "access":
+            if claims["type"] != TokenType.ACCESS.value:
                 raise ValueError
             user = await self._repository.get(UUID(str(claims["sub"])))
             if user is None or not user.is_active:
@@ -120,19 +126,24 @@ class AuthService:
             raise AuthenticationError(AUTH_INACTIVE_ACCOUNT_MESSAGE) from None
 
     async def refresh(self, token: str) -> dict[str, str]:
-        try:
-            claims = decode_token(token, self._secret)
-        except ValueError:
-            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE) from None
-        if claims["type"] != "refresh":
-            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
+        claims = self._decode_refresh_token(token)
 
         user_id = UUID(str(claims["sub"]))
+        replayed = False
         async with self._transaction():
             user = await self._repository.get_for_update(user_id)
             session = await self._repository.get_refresh_for_update(str(claims["jti"]))
             now = datetime.now(UTC)
             if (
+                user is not None
+                and session is not None
+                and session.user_id == user_id
+                and session.revoked_at is not None
+                and session.expires_at > now
+            ):
+                await self._repository.revoke_user_refresh_sessions(user_id, now)
+                replayed = True
+            elif (
                 session is None
                 or session.user_id != user_id
                 or session.revoked_at is not None
@@ -141,29 +152,15 @@ class AuthService:
                 or not user.is_active
             ):
                 raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
-            session.revoked_at = now
-            pair = self._token_pair(user)
-            new_claims = decode_token(pair["refresh_token"], self._secret)
-            await self._repository.add_refresh(
-                RefreshSession(
-                    jti=pair["jti"],
-                    user_id=user.id,
-                    expires_at=datetime.fromtimestamp(int(new_claims["exp"]), UTC),
-                )
-            )
-            tokens = {
-                "access_token": pair["access_token"],
-                "refresh_token": pair["refresh_token"],
-            }
+            else:
+                session.revoked_at = now
+                tokens = await self._issue_tokens(user)
+        if replayed:
+            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
         return tokens
 
     async def logout(self, token: str) -> None:
-        try:
-            claims = decode_token(token, self._secret)
-        except ValueError:
-            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE) from None
-        if claims["type"] != "refresh":
-            raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
+        claims = self._decode_refresh_token(token)
 
         async with self._transaction():
             session = await self._repository.get_refresh_for_update(str(claims["jti"]))

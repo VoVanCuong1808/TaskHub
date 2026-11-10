@@ -4,9 +4,12 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
+from app.core.constants import (
+    AUTH_INVALID_REFRESH_TOKEN_MESSAGE,
+    AUTH_UNTRUSTED_ORIGIN_MESSAGE,
+)
 from app.core.deps import AuthServiceDep, SettingsDep
 from app.core.exceptions import AuthenticationError
 from app.schemas.auth import AccessToken, LoginRequest, RegisterRequest
@@ -16,6 +19,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE = "refresh_token"
 
 
+class UntrustedOriginError(HTTPException):
+    def __init__(self) -> None:
+        super().__init__(status_code=403, detail=AUTH_UNTRUSTED_ORIGIN_MESSAGE)
+
+
 def _origin(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
 
@@ -23,12 +31,12 @@ def _origin(request: Request) -> str:
 def require_trusted_origin(request: Request, settings: Settings) -> None:
     origin = request.headers.get("origin")
     if origin is None or origin == "null":
-        raise HTTPException(status_code=403, detail="Untrusted Origin")
+        raise UntrustedOriginError
     try:
         parsed = urlsplit(origin)
         _port = parsed.port
     except ValueError:
-        raise HTTPException(status_code=403, detail="Untrusted Origin") from None
+        raise UntrustedOriginError from None
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
@@ -40,14 +48,20 @@ def require_trusted_origin(request: Request, settings: Settings) -> None:
         or origin != f"{parsed.scheme}://{parsed.netloc}"
         or origin not in {_origin(request), *settings.frontend_origins}
     ):
-        raise HTTPException(status_code=403, detail="Untrusted Origin")
+        raise UntrustedOriginError
 
 
 def origin_guard(request: Request, settings: SettingsDep) -> None:
     require_trusted_origin(request, settings)
 
 
+def login_origin_guard(request: Request, settings: SettingsDep) -> None:
+    if request.headers.get("origin") is not None:
+        require_trusted_origin(request, settings)
+
+
 OriginGuard = Annotated[None, Depends(origin_guard)]
+LoginOriginGuard = Annotated[None, Depends(login_origin_guard)]
 
 
 def _set_refresh_cookie(response: Response, token: str, settings: Settings) -> None:
@@ -100,7 +114,7 @@ async def register(payload: RegisterRequest, service: AuthServiceDep) -> UserRea
     },
 )
 async def login(
-    _origin: OriginGuard,
+    _origin: LoginOriginGuard,
     payload: LoginRequest,
     response: Response,
     service: AuthServiceDep,
@@ -127,7 +141,7 @@ async def refresh(
     refresh_token: Annotated[str | None, Cookie()] = None,
 ) -> AccessToken:
     if not refresh_token:
-        raise AuthenticationError("Invalid refresh token")
+        raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
     pair = await service.refresh(refresh_token)
     _set_refresh_cookie(response, pair["refresh_token"], settings)
     return _access_response(pair, response)
@@ -148,14 +162,10 @@ async def logout(
     settings: SettingsDep,
     refresh_token: Annotated[str | None, Cookie()] = None,
 ) -> Response:
-    try:
-        if not refresh_token:
-            raise AuthenticationError("Invalid refresh token")
-        await service.logout(refresh_token)
-    except AuthenticationError as exc:
-        response = JSONResponse(status_code=401, content={"detail": str(exc)})
-    else:
-        response.status_code = status.HTTP_204_NO_CONTENT
+    if not refresh_token:
+        raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)
+    await service.logout(refresh_token)
+    response.status_code = status.HTTP_204_NO_CONTENT
     _clear_refresh_cookie(response, settings)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"

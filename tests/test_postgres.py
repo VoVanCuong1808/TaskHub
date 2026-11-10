@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import unittest
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,7 +22,7 @@ from starlette.requests import Request
 from app.core.config import Settings
 from app.core.constants import AUTH_INACTIVE_ACCOUNT_MESSAGE
 from app.core.exceptions import AuthenticationError, TaskNotFoundError
-from app.core.security import create_token, hash_password_async
+from app.core.security import create_token, decode_token, hash_password_async
 from app.db.base import Base
 from app.db.legacy_upgrade import upgrade_legacy_schema
 from app.db.seed import (
@@ -36,6 +36,7 @@ from app.models.entities import (
     Comment,
     Label,
     Project,
+    RefreshSession,
     TaskLabel,
     User,
     Workspace,
@@ -315,9 +316,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rejected.status_code, 403)
                 self.assertNotIn("set-cookie", rejected.headers)
 
+            client.headers.pop("Origin")
             logged_in = client.post(
                 "/api/v1/auth/login", json={"email": email, "password": password}
             )
+            client.headers["Origin"] = "http://testserver"
             self.assertEqual(logged_in.status_code, 200)
             pair = logged_in.json()
             access = pair["access_token"]
@@ -386,7 +389,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                     access_minutes=settings.access_token_minutes,
                     refresh_days=settings.refresh_token_days,
                 )
-                race_token = (await service.login(email, password))["refresh_token"]
+                race_email = f"race-{uuid4().hex}@example.com"
+                await service.register(race_email, "Race User", password)
+                race_token = (await service.login(race_email, password))[
+                    "refresh_token"
+                ]
 
             async def refresh_once():
                 async with self.session_factory() as session:
@@ -409,11 +416,6 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             rotated_cookie = client.cookies.get("refresh_token")
             self.assertNotEqual(rotated_cookie, cookie)
             self.assertNotIn("refresh_token", rotated.json())
-            replay = client.post(
-                "/api/v1/auth/refresh", headers={"Cookie": f"refresh_token={cookie}"}
-            )
-            self.assertEqual(replay.status_code, 401)
-            self.assertNotIn("set-cookie", replay.headers)
             client.cookies.set(
                 "refresh_token",
                 rotated_cookie,
@@ -429,7 +431,16 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             invalid_logout = client.post("/api/v1/auth/logout")
             self.assertEqual(invalid_logout.status_code, 401)
+            self.assertEqual(invalid_logout.headers["www-authenticate"], "Bearer")
             self.assertIn("max-age=0", invalid_logout.headers["set-cookie"].lower())
+            self.assertEqual(invalid_logout.headers["cache-control"], "no-store")
+            self.assertEqual(invalid_logout.headers["pragma"], "no-cache")
+
+            replay = client.post(
+                "/api/v1/auth/refresh", headers={"Cookie": f"refresh_token={cookie}"}
+            )
+            self.assertEqual(replay.status_code, 401)
+            self.assertNotIn("set-cookie", replay.headers)
 
             persistent_login_response = client.post(
                 "/api/v1/auth/login", json={"email": email, "password": password}
@@ -448,6 +459,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             after_restart = client.post("/api/v1/auth/refresh")
             self.assertEqual(after_restart.status_code, 200)
+
             access = persistent_login["access_token"]
             headers = {"Authorization": f"Bearer {access}"}
 
@@ -539,6 +551,121 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 ).status_code,
                 401,
             )
+
+    async def test_refresh_replay_commits_user_session_revocation(self) -> None:
+        settings = Settings(
+            database_url=self.test_url,
+            jwt_secret_key=SecretStr("day3-test-signing-secret-at-least-32-bytes"),
+            refresh_cookie_secure=False,
+        )
+        email = f"{uuid4().hex}@example.com"
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=settings.jwt_secret_key.get_secret_value(),
+                access_minutes=settings.access_token_minutes,
+                refresh_days=settings.refresh_token_days,
+            )
+            user = await service.register(
+                email, "Replay User", "long password for test"
+            )
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=settings.jwt_secret_key.get_secret_value(),
+                access_minutes=settings.access_token_minutes,
+                refresh_days=settings.refresh_token_days,
+            )
+            first = await service.login(email, "long password for test")
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=settings.jwt_secret_key.get_secret_value(),
+                access_minutes=settings.access_token_minutes,
+                refresh_days=settings.refresh_token_days,
+            )
+            second = await service.login(email, "long password for test")
+            self.assertIn("refresh_token", second)
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=settings.jwt_secret_key.get_secret_value(),
+                access_minutes=settings.access_token_minutes,
+                refresh_days=settings.refresh_token_days,
+            )
+            rotated = await service.refresh(first["refresh_token"])
+            self.assertIn("refresh_token", rotated)
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=settings.jwt_secret_key.get_secret_value(),
+                access_minutes=settings.access_token_minutes,
+                refresh_days=settings.refresh_token_days,
+            )
+            with self.assertRaises(AuthenticationError):
+                await service.refresh(first["refresh_token"])
+        async with self.session_factory() as session:
+            sessions = list(
+                (
+                    await session.scalars(
+                        select(RefreshSession).where(RefreshSession.user_id == user.id)
+                    )
+                ).all()
+            )
+        self.assertEqual(len(sessions), 3)
+        self.assertTrue(all(item.revoked_at is not None for item in sessions))
+
+    async def test_expired_revoked_refresh_does_not_revoke_other_sessions(self) -> None:
+        secret = "day3-test-signing-secret-at-least-32-bytes"
+        email = f"{uuid4().hex}@example.com"
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=secret,
+                access_minutes=10,
+                refresh_days=10,
+            )
+            user = await service.register(
+                email, "Expired Replay", "long password for test"
+            )
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=secret,
+                access_minutes=10,
+                refresh_days=10,
+            )
+            first = await service.login(email, "long password for test")
+            second = await service.login(email, "long password for test")
+        claims = decode_token(first["refresh_token"], secret)
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with self.session_factory() as session:
+            old_session = await session.get(RefreshSession, str(claims["jti"]))
+            old_session.revoked_at = expired_at
+            old_session.expires_at = expired_at
+            await session.commit()
+        expired_token, _, _ = create_token(
+            secret=secret,
+            subject=user.id,
+            token_type="refresh",
+            expires_in=timedelta(seconds=-1),
+            jti=str(claims["jti"]),
+        )
+        async with self.session_factory() as session:
+            service = AuthService(
+                UserRepository(session),
+                secret=secret,
+                access_minutes=10,
+                refresh_days=10,
+            )
+            with self.assertRaises(AuthenticationError):
+                await service.refresh(expired_token)
+        async with self.session_factory() as session:
+            remaining = await session.get(
+                RefreshSession,
+                str(decode_token(second["refresh_token"], secret)["jti"]),
+            )
+        self.assertIsNone(remaining.revoked_at)
 
     async def test_user_for_update_refreshes_preloaded_password_hash(self) -> None:
         user_id = uuid4()

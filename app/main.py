@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from app.api.v1.auth import _clear_refresh_cookie
 from app.api.v1.router import api_router
 from app.api.v1.tasks import router as tasks_router
 from app.core.config import Settings, get_settings
@@ -102,8 +103,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         secret = settings.jwt_secret_key
-        if secret is None or len(secret.get_secret_value().encode("utf-8")) < 32:
-            raise RuntimeError("TASKHUB_JWT_SECRET_KEY must contain at least 32 bytes")
+        if secret is None:
+            raise RuntimeError("TASKHUB_JWT_SECRET_KEY must be configured")
         app.state.engine = make_engine(
             settings.database_url, echo=settings.database_echo
         )
@@ -145,11 +146,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def authentication_error_handler(
         request: Request, exc: AuthenticationError
     ) -> JSONResponse:
-        return JSONResponse(
+        response = JSONResponse(
             status_code=401,
             headers={"WWW-Authenticate": "Bearer"},
             content={"detail": str(exc)},
         )
+        if request.url.path == f"{settings.api_v1_prefix.rstrip('/')}/auth/logout":
+            _clear_refresh_cookie(response, settings)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(

@@ -9,6 +9,7 @@ from app.models.entities import User
 from app.schemas.user import ChangePasswordRequest, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 @router.get(
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/users", tags=["users"])
     response_model=UserRead,
     responses={401: {"description": "Not authenticated"}},
 )
-async def get_me(user: Annotated[User, Depends(get_current_user)]) -> UserRead:
+async def get_me(user: CurrentUser) -> UserRead:
     return UserRead.model_validate(user)
 
 
@@ -30,7 +31,7 @@ async def get_me(user: Annotated[User, Depends(get_current_user)]) -> UserRead:
 )
 async def update_me(
     payload: UserUpdate,
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     service: AuthServiceDep,
 ) -> UserRead:
     updated = await service.update_profile(user, payload.model_dump(exclude_unset=True))
@@ -44,7 +45,7 @@ async def update_me(
 )
 async def change_password(
     payload: ChangePasswordRequest,
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     service: AuthServiceDep,
 ):
     await service.change_password(user, payload.current_password, payload.new_password)

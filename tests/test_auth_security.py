@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 import unittest
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -18,9 +18,11 @@ from starlette.responses import Response
 from app.api.v1.auth import (
     _clear_refresh_cookie,
     _set_refresh_cookie,
+    login_origin_guard,
     require_trusted_origin,
 )
 from app.core.config import Settings
+from app.core.exceptions import AuthenticationError
 from app.core.security import (
     create_token,
     decode_token,
@@ -30,7 +32,7 @@ from app.core.security import (
     verify_password_async,
 )
 from app.main import create_app
-from app.models.entities import User
+from app.models.entities import RefreshSession, User
 from app.models.enums import UserRole
 from app.schemas.auth import RegisterRequest
 from app.schemas.user import UserUpdate
@@ -162,9 +164,12 @@ class AsyncPasswordTests(unittest.IsolatedAsyncioTestCase):
             rollbacks = 0
             fail_lookup = True
 
-            async def get_by_email_for_update(self, email: str):
+            async def get_by_email(self, email: str):
                 if self.fail_lookup:
                     raise RuntimeError("query failed")
+                return self.user
+
+            async def get_for_update(self, user_id):
                 return self.user
 
             async def commit(self) -> None:
@@ -187,6 +192,7 @@ class AsyncPasswordTests(unittest.IsolatedAsyncioTestCase):
             await service.register("new@example.com", "New User", "password")
         with self.assertRaisesRegex(RuntimeError, "query failed"):
             await service.login("user@example.com", "password")
+        self.assertEqual(repository.rollbacks, 1)
 
         repository.fail_lookup = False
         with (
@@ -195,14 +201,159 @@ class AsyncPasswordTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value=True),
             ),
             patch.object(
-                service, "_token_pair", side_effect=RuntimeError("token failed")
+                service, "_issue_tokens", side_effect=RuntimeError("token failed")
             ),
             self.assertRaisesRegex(RuntimeError, "token failed"),
         ):
             await service.login("user@example.com", "password")
 
-        self.assertEqual(repository.rollbacks, 3)
+        self.assertEqual(repository.rollbacks, 2)
         self.assertEqual(repository.commits, 0)
+
+    async def test_login_rejects_password_changed_after_hash_verification(self) -> None:
+        user = User(
+            id=uuid4(),
+            email="user@example.com",
+            full_name="User",
+            hashed_password="verified-hash",
+            role=UserRole.MEMBER,
+            is_active=True,
+        )
+
+        class Repository:
+            commits = 0
+            rollbacks = 0
+
+            async def get_by_email(self, email: str):
+                return user
+
+            async def get_for_update(self, user_id):
+                user.hashed_password = "changed-hash"
+                return user
+
+            async def add_refresh(self, session) -> None:
+                raise AssertionError("must not issue tokens after password change")
+
+            async def commit(self) -> None:
+                self.commits += 1
+
+            async def rollback(self) -> None:
+                self.rollbacks += 1
+
+        repository = Repository()
+        service = AuthService(
+            repository, secret=SECRET, access_minutes=10, refresh_days=10
+        )
+        with (
+            patch(
+                "app.services.auth_service.verify_password_async",
+                AsyncMock(return_value=True),
+            ),
+            self.assertRaises(AuthenticationError),
+        ):
+            await service.login("user@example.com", "password")
+        self.assertEqual(repository.commits, 0)
+        self.assertEqual(repository.rollbacks, 1)
+
+    async def test_login_rejects_email_changed_after_hash_verification(self) -> None:
+        user = User(
+            id=uuid4(),
+            email="user@example.com",
+            full_name="User",
+            hashed_password="verified-hash",
+            role=UserRole.MEMBER,
+            is_active=True,
+        )
+
+        class Repository:
+            commits = 0
+            rollbacks = 0
+
+            async def get_by_email(self, email: str):
+                return user
+
+            async def get_for_update(self, user_id):
+                user.email = "changed@example.com"
+                return user
+
+            async def add_refresh(self, session) -> None:
+                raise AssertionError("must not issue tokens after email change")
+
+            async def commit(self) -> None:
+                self.commits += 1
+
+            async def rollback(self) -> None:
+                self.rollbacks += 1
+
+        repository = Repository()
+        service = AuthService(
+            repository, secret=SECRET, access_minutes=10, refresh_days=10
+        )
+        with (
+            patch(
+                "app.services.auth_service.verify_password_async",
+                AsyncMock(return_value=True),
+            ),
+            self.assertRaises(AuthenticationError),
+        ):
+            await service.login("user@example.com", "password")
+        self.assertEqual(repository.commits, 0)
+        self.assertEqual(repository.rollbacks, 1)
+
+    async def test_refresh_replay_commits_session_revocation_before_rejecting(
+        self,
+    ) -> None:
+        user_id = uuid4()
+        jti = str(uuid4())
+        now = datetime.now(UTC)
+        user = User(
+            id=user_id,
+            email="user@example.com",
+            full_name="User",
+            hashed_password="hash",
+            role=UserRole.MEMBER,
+            is_active=True,
+        )
+        session = RefreshSession(
+            jti=jti,
+            user_id=user_id,
+            expires_at=now + timedelta(days=1),
+            revoked_at=now,
+        )
+
+        class Repository:
+            def __init__(self) -> None:
+                self.events = []
+
+            async def get_for_update(self, user_id):
+                return user
+
+            async def get_refresh_for_update(self, token_id):
+                return session
+
+            async def revoke_user_refresh_sessions(self, user_id, now) -> None:
+                self.events.append("revoke")
+
+            async def commit(self) -> None:
+                self.events.append("commit")
+
+            async def rollback(self) -> None:
+                self.events.append("rollback")
+
+        repository = Repository()
+        service = AuthService(
+            repository, secret=SECRET, access_minutes=10, refresh_days=10
+        )
+        token, _, _ = create_token(
+            secret=SECRET,
+            subject=user_id,
+            token_type="refresh",
+            expires_in=timedelta(days=1),
+            jti=jti,
+        )
+        with self.assertRaises(AuthenticationError):
+            await service.refresh(token)
+        self.assertEqual(repository.events, ["revoke", "commit"])
 
 
 class SettingsTests(unittest.IsolatedAsyncioTestCase):
@@ -211,6 +362,8 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
             Settings(environment="production", refresh_cookie_secure=False)
         with self.assertRaisesRegex(ValidationError, "SameSite=None requires"):
             Settings(refresh_cookie_secure=False, refresh_cookie_samesite="none")
+        with self.assertRaisesRegex(ValidationError, "32 bytes"):
+            Settings(jwt_secret_key="short")
         for origins in (["*"], ["https://example.com/path"], ["ftp://example.com"]):
             with self.subTest(origins=origins), self.assertRaises(ValidationError):
                 Settings(frontend_origins=origins)
@@ -247,6 +400,9 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
                 require_trusted_origin(request(origin), settings)
             self.assertEqual(caught.exception.status_code, 403)
         require_trusted_origin(request("https://ui.example.test"), settings)
+        login_origin_guard(request(None), settings)
+        with self.assertRaises(HTTPException):
+            login_origin_guard(request("https://attacker.example"), settings)
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app(settings)),
@@ -297,14 +453,10 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_or_missing_jwt_secret_fails_before_database_startup(
         self,
     ) -> None:
-        for secret in (None, "short"):
-            app = create_app(Settings(jwt_secret_key=secret))
-            with (
-                self.subTest(secret_is_set=secret is not None),
-                self.assertRaisesRegex(RuntimeError, "at least 32 bytes"),
-            ):
-                async with app.router.lifespan_context(app):
-                    self.fail("startup should reject the signing key")
+        app = create_app(Settings(jwt_secret_key=None))
+        with self.assertRaisesRegex(RuntimeError, "must be configured"):
+            async with app.router.lifespan_context(app):
+                self.fail("startup should reject a missing signing key")
 
 
 class TokenTests(unittest.TestCase):

@@ -37,6 +37,9 @@ class UserRepository:
             .execution_options(populate_existing=True)
         )
 
+    async def get_by_email(self, email: str) -> User | None:
+        return await self._session.scalar(select(User).where(User.email == email))
+
     async def add_refresh(self, session: RefreshSession) -> None:
         self._session.add(session)
         await self._session.flush()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,11 +45,16 @@ class Settings(BaseSettings):
             raise ValueError("must be lax, strict, or none")
         return value
 
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def valid_jwt_secret(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value().encode("utf-8")) < 32:
+            raise ValueError("must contain at least 32 bytes")
+        return value
+
     @field_validator("frontend_origins")
     @classmethod
     def valid_origins(cls, values: list[str]) -> list[str]:
-        from urllib.parse import urlsplit
-
         for origin in values:
             parsed = urlsplit(origin)
             try:
