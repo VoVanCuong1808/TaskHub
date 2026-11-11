@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 TASK_NOT_FOUND_DESCRIPTION = "Task not found"
+TASK_NOT_FOUND_MESSAGE = TASK_NOT_FOUND_DESCRIPTION
+PROJECT_NOT_FOUND_MESSAGE = "Project not found"
+INSUFFICIENT_WORKSPACE_ROLE_MESSAGE = "Insufficient workspace role"
+PROJECT_ARCHIVED_MESSAGE = "Project is archived"
 
 EXPLICIT_NULL_MESSAGE = "must not be null; omit the field to leave it unchanged"
 

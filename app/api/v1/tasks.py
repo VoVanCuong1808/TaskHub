@@ -39,7 +39,7 @@ async def create_task(
 async def list_tasks(
     service: TaskServiceDep,
     user: CurrentUserDep,
-    project_id: UUID,
+    project_id: Annotated[UUID, Query(description="Project scope")],
     task_status: Annotated[
         TaskStatus | None, Query(alias="status", description="Filter by status")
     ] = None,

@@ -28,11 +28,8 @@ from app.core.constants import (
     INTEGRITY_RESTRICTED_MESSAGE,
 )
 from app.core.exceptions import (
+    ApplicationError,
     AuthenticationError,
-    PermissionDeniedError,
-    ProjectArchivedError,
-    ProjectNotFoundError,
-    TaskNotFoundError,
 )
 from app.db.base import make_engine, make_session_factory
 from app.db.seed import seed_default_data
@@ -142,35 +139,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-    @app.exception_handler(TaskNotFoundError)
-    async def task_not_found_handler(
-        request: Request, exc: TaskNotFoundError
+    @app.exception_handler(ApplicationError)
+    async def application_error_handler(
+        request: Request, exc: ApplicationError
     ) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"detail": str(exc)})
-
-    @app.exception_handler(ProjectNotFoundError)
-    async def project_not_found_handler(
-        request: Request, exc: ProjectNotFoundError
-    ) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"detail": str(exc)})
-
-    @app.exception_handler(PermissionDeniedError)
-    async def permission_denied_handler(
-        request: Request, exc: PermissionDeniedError
-    ) -> JSONResponse:
-        return JSONResponse(status_code=403, content={"detail": str(exc)})
-
-    @app.exception_handler(ProjectArchivedError)
-    async def project_archived_handler(
-        request: Request, exc: ProjectArchivedError
-    ) -> JSONResponse:
-        return JSONResponse(status_code=409, content={"detail": str(exc)})
-
-    @app.exception_handler(AuthenticationError)
-    async def authentication_error_handler(
-        request: Request, exc: AuthenticationError
-    ) -> JSONResponse:
-        return authentication_error_response(exc)
+        if isinstance(exc, AuthenticationError):
+            return authentication_error_response(exc)
+        return JSONResponse(
+            status_code=int(exc.status_code), content={"detail": exc.detail}
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
