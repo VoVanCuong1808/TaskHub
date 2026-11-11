@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
@@ -50,13 +50,21 @@ from app.models.entities import (
 from app.models.entities import (
     Task as TaskRow,
 )
-from app.models.enums import ProjectStatus, TaskStatus, UserRole, WorkspaceRole
+from app.models.enums import (
+    ProjectStatus,
+    TaskStatus,
+    UserRole,
+    WorkspacePermission,
+    WorkspaceRole,
+)
 from app.models.task import Task
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
+from app.repositories.workspace_repository import WorkspaceRepository
 from app.schemas.task import TaskUpdate
 from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
+from app.services.workspace_service import WorkspaceService
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_DATABASE_ENV = "TASKHUB_TEST_DATABASE_URL"
@@ -472,6 +480,406 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.post("/api/v1/tasks", headers=headers, json={"title": "No project"}).status_code, 422)
             self.assertEqual(client.get("/api/v1/tasks", params={"project_id": "not-a-uuid"}, headers=headers).status_code, 422)
 
+    async def _make_workspace_fixture(self):
+        secret = "day4-workspace-test-signing-secret-at-least-32-bytes"
+        users = [
+            User(
+                id=uuid4(),
+                email=f"{role}-{uuid4().hex}@example.com",
+                full_name=role,
+                hashed_password="unused",
+                role=global_role,
+                is_active=role != "inactive",
+            )
+            for role, global_role in (
+                ("owner", UserRole.MEMBER),
+                ("editor", UserRole.MEMBER),
+                ("viewer", UserRole.MEMBER),
+                ("outsider", UserRole.MEMBER),
+                ("admin", UserRole.ADMIN),
+                ("invitee", UserRole.MEMBER),
+                ("inactive", UserRole.MEMBER),
+                ("stale-owner", UserRole.MEMBER),
+            )
+        ]
+        owner, editor, viewer, outsider, admin, invitee, inactive, stale_owner = users
+        workspace = Workspace(name="Workspace fixture", owner_id=owner.id)
+        other_workspace = Workspace(name="Other workspace", owner_id=outsider.id)
+        async with self.session_factory() as session:
+            session.add_all([*users, workspace, other_workspace])
+            await session.flush()
+            session.add_all(
+                [
+                    WorkspaceMember(
+                        workspace_id=workspace.id,
+                        user_id=user.id,
+                        role=role,
+                    )
+                    for user, role in (
+                        (owner, WorkspaceRole.OWNER),
+                        (editor, WorkspaceRole.EDITOR),
+                        (viewer, WorkspaceRole.VIEWER),
+                    )
+                ]
+            )
+            project = Project(workspace_id=workspace.id, name="Workspace project")
+            session.add(project)
+            await session.flush()
+            task = TaskRow(
+                project_id=project.id,
+                title="Workspace task",
+                status=TaskStatus.TODO,
+                created_by=owner.id,
+            )
+            session.add(task)
+            await session.commit()
+        return SimpleNamespace(
+            secret=secret,
+            owner=owner,
+            editor=editor,
+            viewer=viewer,
+            outsider=outsider,
+            admin=admin,
+            invitee=invitee,
+            inactive=inactive,
+            stale_owner=stale_owner,
+            workspace=workspace,
+            other_workspace=other_workspace,
+            project=project,
+            task=task,
+        )
+
+    def _workspace_settings(self, secret: str) -> Settings:
+        return Settings(
+            database_url=self.test_url,
+            jwt_secret_key=SecretStr(secret),
+            refresh_cookie_secure=False,
+        )
+
+    @staticmethod
+    def _workspace_headers(user: User, secret: str) -> dict[str, str]:
+        token, _, _ = create_token(
+            secret=secret,
+            subject=user.id,
+            token_type="access",
+            expires_in=timedelta(minutes=10),
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    async def test_workspace_authentication_and_owner_crud(self) -> None:
+        data = await self._make_workspace_fixture()
+        headers = self._workspace_headers(data.owner, data.secret)
+        with TestClient(create_app(self._workspace_settings(data.secret))) as client:
+            missing_id = uuid4()
+            unauthenticated = (
+                ("get", "/api/v1/workspaces", {}),
+                ("post", "/api/v1/workspaces", {"json": {"name": "x"}}),
+                ("get", f"/api/v1/workspaces/{missing_id}", {}),
+                ("patch", f"/api/v1/workspaces/{missing_id}", {"json": {"name": "x"}}),
+                ("delete", f"/api/v1/workspaces/{missing_id}", {}),
+                ("get", f"/api/v1/workspaces/{missing_id}/members", {}),
+                ("post", f"/api/v1/workspaces/{missing_id}/members", {"json": {"email": "a@example.test", "role": "viewer"}}),
+                ("patch", f"/api/v1/workspaces/{missing_id}/members/{uuid4()}", {"json": {"role": "editor"}}),
+                ("delete", f"/api/v1/workspaces/{missing_id}/members/{uuid4()}", {}),
+            )
+            for method, path, kwargs in unauthenticated:
+                response = getattr(client, method)(path, **kwargs)
+                self.assertEqual(response.status_code, 401, path)
+                self.assertEqual(response.headers["www-authenticate"], "Bearer")
+
+            created = client.post(
+                "/api/v1/workspaces",
+                headers=headers,
+                json={"name": "  Created workspace  "},
+            )
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(created.json()["name"], "Created workspace")
+            workspace_id = UUID(created.json()["id"])
+            self.assertEqual(created.json()["owner_id"], str(data.owner.id))
+            async with self.session_factory() as session:
+                membership = await session.get(
+                    WorkspaceMember, (workspace_id, data.owner.id)
+                )
+            self.assertIsNotNone(membership)
+            self.assertEqual(membership.role, WorkspaceRole.OWNER)
+
+            listed = client.get("/api/v1/workspaces", headers=headers)
+            self.assertIn(workspace_id, [UUID(item["id"]) for item in listed.json()["items"]])
+            self.assertEqual(client.get(f"/api/v1/workspaces/{workspace_id}", headers=headers).status_code, 200)
+            renamed = client.patch(
+                f"/api/v1/workspaces/{workspace_id}",
+                headers=headers,
+                json={"name": "Renamed workspace"},
+            )
+            self.assertEqual(renamed.status_code, 200)
+            self.assertEqual(renamed.json()["name"], "Renamed workspace")
+            self.assertEqual(client.delete(f"/api/v1/workspaces/{workspace_id}", headers=headers).status_code, 204)
+            self.assertEqual(client.get(f"/api/v1/workspaces/{workspace_id}", headers=headers).status_code, 404)
+
+    async def test_workspace_member_lifecycle_and_conflict_409(self) -> None:
+        data = await self._make_workspace_fixture()
+        headers = self._workspace_headers(data.owner, data.secret)
+        member_path = f"/api/v1/workspaces/{data.workspace.id}/members"
+        with TestClient(create_app(self._workspace_settings(data.secret))) as client:
+            members = client.get(member_path, headers=headers)
+            self.assertEqual(members.status_code, 200)
+            self.assertEqual(len(members.json()), 3)
+            invite = client.post(
+                member_path,
+                headers=headers,
+                json={"email": data.invitee.email.upper(), "role": "editor"},
+            )
+            self.assertEqual(invite.status_code, 201, invite.text)
+            self.assertEqual(invite.json()["user_id"], str(data.invitee.id))
+            self.assertEqual(invite.json()["role"], "editor")
+            self.assertEqual(
+                client.post(member_path, headers=headers, json={"email": data.invitee.email, "role": "viewer"}).status_code,
+                409,
+            )
+            self.assertEqual(
+                client.post(member_path, headers=headers, json={"email": data.owner.email, "role": "viewer"}).status_code,
+                409,
+            )
+            self.assertEqual(
+                client.post(member_path, headers=headers, json={"email": "missing@example.com", "role": "viewer"}).status_code,
+                404,
+            )
+            self.assertEqual(
+                client.post(member_path, headers=headers, json={"email": data.inactive.email, "role": "viewer"}).status_code,
+                404,
+            )
+            for email in ("missing@example.com", data.inactive.email):
+                self.assertEqual(
+                    client.post(
+                        member_path,
+                        headers=headers,
+                        json={"email": email, "role": "owner"},
+                    ).status_code,
+                    404,
+                )
+            self.assertEqual(
+                client.post(
+                    member_path,
+                    headers=headers,
+                    json={"email": data.outsider.email, "role": "owner"},
+                ).status_code,
+                409,
+            )
+            self.assertEqual(
+                client.post(member_path, headers=headers, json={"email": data.invitee.email, "role": "owner"}).status_code,
+                409,
+            )
+            self.assertEqual(
+                client.patch(f"{member_path}/{data.owner.id}", headers=headers, json={"role": "editor"}).status_code,
+                409,
+            )
+            self.assertEqual(
+                client.patch(f"{member_path}/{data.viewer.id}", headers=headers, json={"role": "owner"}).status_code,
+                409,
+            )
+            self.assertEqual(client.delete(f"{member_path}/{data.owner.id}", headers=headers).status_code, 409)
+
+            changed = client.patch(
+                f"{member_path}/{data.viewer.id}",
+                headers=headers,
+                json={"role": "editor"},
+            )
+            self.assertEqual(changed.status_code, 200)
+            self.assertEqual(changed.json()["role"], "editor")
+            self.assertEqual(client.delete(f"{member_path}/{data.viewer.id}", headers=headers).status_code, 204)
+            self.assertEqual(client.delete(f"{member_path}/{data.viewer.id}", headers=headers).status_code, 404)
+            missing_id = uuid4()
+            self.assertEqual(
+                client.patch(f"{member_path}/{missing_id}", headers=headers, json={"role": "editor"}).status_code,
+                404,
+            )
+            self.assertEqual(
+                client.patch(f"{member_path}/{missing_id}", headers=headers, json={"role": "owner"}).status_code,
+                404,
+            )
+
+    async def test_workspace_member_role_403_and_cross_workspace_404(self) -> None:
+        data = await self._make_workspace_fixture()
+        with TestClient(create_app(self._workspace_settings(data.secret))) as client:
+            for user in (data.editor, data.viewer):
+                headers = self._workspace_headers(user, data.secret)
+                self.assertEqual(client.get(f"/api/v1/workspaces/{data.workspace.id}", headers=headers).status_code, 200)
+                self.assertEqual(client.get(f"/api/v1/workspaces/{data.workspace.id}/members", headers=headers).status_code, 200)
+                operations = (
+                    ("patch", f"/api/v1/workspaces/{data.workspace.id}", {"json": {"name": "Denied"}}),
+                    ("delete", f"/api/v1/workspaces/{data.workspace.id}", {}),
+                    ("post", f"/api/v1/workspaces/{data.workspace.id}/members", {"json": {"email": data.invitee.email, "role": "viewer"}}),
+                    ("patch", f"/api/v1/workspaces/{data.workspace.id}/members/{data.viewer.id}", {"json": {"role": "editor"}}),
+                    ("delete", f"/api/v1/workspaces/{data.workspace.id}/members/{data.viewer.id}", {}),
+                )
+                for method, path, kwargs in operations:
+                    response = getattr(client, method)(path, headers=headers, **kwargs)
+                    self.assertEqual(response.status_code, 403, f"{method} {path} as {user.email}")
+                self.assertEqual(
+                    client.patch(
+                        f"/api/v1/workspaces/{data.workspace.id}/members/{uuid4()}",
+                        headers=headers,
+                        json={"role": "owner"},
+                    ).status_code,
+                    403,
+                )
+
+            for user in (data.outsider, data.admin):
+                headers = self._workspace_headers(user, data.secret)
+                visible = client.get("/api/v1/workspaces", headers=headers).json()["items"]
+                self.assertNotIn(str(data.workspace.id), [item["id"] for item in visible])
+                self.assertEqual(client.get(f"/api/v1/workspaces/{data.workspace.id}", headers=headers).status_code, 404)
+                self.assertEqual(client.get(f"/api/v1/workspaces/{data.workspace.id}/members", headers=headers).status_code, 404)
+                for method, path, kwargs in (
+                    ("patch", f"/api/v1/workspaces/{data.workspace.id}", {"json": {"name": "Hidden"}}),
+                    ("delete", f"/api/v1/workspaces/{data.workspace.id}", {}),
+                    ("post", f"/api/v1/workspaces/{data.workspace.id}/members", {"json": {"email": data.invitee.email, "role": "viewer"}}),
+                    ("patch", f"/api/v1/workspaces/{data.workspace.id}/members/{data.viewer.id}", {"json": {"role": "editor"}}),
+                    ("delete", f"/api/v1/workspaces/{data.workspace.id}/members/{data.viewer.id}", {}),
+                ):
+                    self.assertEqual(getattr(client, method)(path, headers=headers, **kwargs).status_code, 404)
+                self.assertEqual(
+                    client.patch(
+                        f"/api/v1/workspaces/{data.workspace.id}/members/{uuid4()}",
+                        headers=headers,
+                        json={"role": "owner"},
+                    ).status_code,
+                    404,
+                )
+            owner_headers = self._workspace_headers(data.owner, data.secret)
+            missing_id = uuid4()
+            for method, path, kwargs in (
+                ("get", f"/api/v1/workspaces/{missing_id}", {}),
+                ("patch", f"/api/v1/workspaces/{missing_id}", {"json": {"name": "Missing"}}),
+                ("delete", f"/api/v1/workspaces/{missing_id}", {}),
+                ("get", f"/api/v1/workspaces/{missing_id}/members", {}),
+            ):
+                self.assertEqual(getattr(client, method)(path, headers=owner_headers, **kwargs).status_code, 404)
+
+    async def test_stale_owner_is_viewer_but_owner_id_keeps_authority(self) -> None:
+        data = await self._make_workspace_fixture()
+        async with self.session_factory() as session:
+            await session.delete(
+                await session.get(WorkspaceMember, (data.workspace.id, data.owner.id))
+            )
+            session.add(
+                WorkspaceMember(
+                    workspace_id=data.workspace.id,
+                    user_id=data.stale_owner.id,
+                    role=WorkspaceRole.OWNER,
+                )
+            )
+            await session.commit()
+        stale_headers = self._workspace_headers(data.stale_owner, data.secret)
+        owner_headers = self._workspace_headers(data.owner, data.secret)
+        member_path = f"/api/v1/workspaces/{data.workspace.id}/members"
+        with TestClient(create_app(self._workspace_settings(data.secret))) as client:
+            self.assertEqual(
+                client.patch(
+                    f"{member_path}/{data.owner.id}",
+                    headers=owner_headers,
+                    json={"role": "editor"},
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                client.delete(
+                    f"{member_path}/{data.owner.id}", headers=owner_headers
+                ).status_code,
+                404,
+            )
+            self.assertEqual(client.get(f"/api/v1/workspaces/{data.workspace.id}", headers=stale_headers).status_code, 200)
+            self.assertEqual(client.get(member_path, headers=stale_headers).status_code, 200)
+            for method, path, kwargs in (
+                ("patch", f"/api/v1/workspaces/{data.workspace.id}", {"json": {"name": "Stale"}}),
+                ("post", member_path, {"json": {"email": data.invitee.email, "role": "viewer"}}),
+                ("patch", f"{member_path}/{data.viewer.id}", {"json": {"role": "editor"}}),
+                ("delete", f"{member_path}/{data.viewer.id}", {}),
+            ):
+                self.assertEqual(getattr(client, method)(path, headers=stale_headers, **kwargs).status_code, 403)
+            self.assertEqual(client.get(f"/api/v1/tasks/{data.task.id}", headers=stale_headers).status_code, 200)
+            for response in (
+                client.post("/api/v1/tasks", headers=stale_headers, json={"project_id": str(data.project.id), "title": "Denied"}),
+                client.patch(f"/api/v1/tasks/{data.task.id}", headers=stale_headers, json={"title": "Denied"}),
+                client.delete(f"/api/v1/tasks/{data.task.id}", headers=stale_headers),
+            ):
+                self.assertEqual(response.status_code, 403)
+            self.assertEqual(client.patch(f"/api/v1/workspaces/{data.workspace.id}", headers=owner_headers, json={"name": "Owner authority"}).status_code, 200)
+            invited = client.post(
+                member_path,
+                headers=owner_headers,
+                json={"email": data.invitee.email, "role": "viewer"},
+            )
+            self.assertEqual(invited.status_code, 201)
+            changed_member = client.patch(
+                f"{member_path}/{data.editor.id}",
+                headers=owner_headers,
+                json={"role": "viewer"},
+            )
+            self.assertEqual(changed_member.status_code, 200)
+            self.assertEqual(
+                client.delete(f"{member_path}/{data.viewer.id}", headers=owner_headers).status_code,
+                204,
+            )
+            created_task = client.post("/api/v1/tasks", headers=owner_headers, json={"project_id": str(data.project.id), "title": "Owner authority"})
+            self.assertEqual(created_task.status_code, 201)
+            task_id = created_task.json()["id"]
+            self.assertEqual(client.patch(f"/api/v1/tasks/{task_id}", headers=owner_headers, json={"title": "Owner update"}).status_code, 200)
+            self.assertEqual(client.delete(f"/api/v1/tasks/{task_id}", headers=owner_headers).status_code, 204)
+
+    async def test_workspace_update_failure_rolls_back(self) -> None:
+        data = await self._make_workspace_fixture()
+        with self.assertRaises(DBAPIError):
+            async with self.session_factory() as session:
+                await WorkspaceService(WorkspaceRepository(session)).update(
+                    data.workspace.id, data.owner.id, "x" * 201
+                )
+        async with self.session_factory() as session:
+            stored = await session.get(Workspace, data.workspace.id)
+        self.assertEqual(stored.name, "Workspace fixture")
+
+    async def test_workspace_role_revocation_serializes_with_task_write(self) -> None:
+        data = await self._make_workspace_fixture()
+        task_authorized = asyncio.Event()
+        release_task = asyncio.Event()
+        remover_pid_ready = asyncio.Event()
+        remover_pid: int | None = None
+
+        async def hold_task_write() -> None:
+            async with self.session_factory() as session:
+                task = await TaskRepository(session)._authorize_task(
+                    data.task.id, data.editor.id, WorkspacePermission.TASK_UPDATE
+                )
+                task_authorized.set()
+                await release_task.wait()
+                task.title = "write completed before revocation"
+                await session.commit()
+
+        async def revoke_editor() -> None:
+            nonlocal remover_pid
+            async with self.session_factory() as session:
+                remover_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                remover_pid_ready.set()
+                await WorkspaceService(WorkspaceRepository(session)).remove_member(
+                    data.workspace.id, data.owner.id, data.editor.id
+                )
+
+        writer = asyncio.create_task(hold_task_write())
+        await task_authorized.wait()
+        revoker = asyncio.create_task(revoke_editor())
+        await remover_pid_ready.wait()
+        self.assertIsNotNone(remover_pid)
+        await wait_for_database_lock(self.session_factory, remover_pid)
+        release_task.set()
+        await asyncio.wait_for(writer, timeout=5)
+        await asyncio.wait_for(revoker, timeout=5)
+        async with self.session_factory() as session:
+            stored_task = await session.get(TaskRow, data.task.id)
+            membership = await session.get(
+                WorkspaceMember, (data.workspace.id, data.editor.id)
+            )
+        self.assertEqual(stored_task.title, "write completed before revocation")
+        self.assertIsNone(membership)
     async def test_auth_profile_password_rotation_and_persistence(self) -> None:
         settings = Settings(
             database_url=self.test_url,

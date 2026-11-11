@@ -19,8 +19,10 @@ from app.db.base import get_db
 from app.models.entities import User
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
+from app.repositories.workspace_repository import WorkspaceRepository
 from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
+from app.services.workspace_service import WorkspaceService
 
 
 def get_task_repository(
@@ -80,3 +82,18 @@ async def get_current_user(
 
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
+
+
+def get_workspace_repository(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> WorkspaceRepository:
+    return WorkspaceRepository(session)
+
+
+def get_workspace_service(
+    repository: Annotated[WorkspaceRepository, Depends(get_workspace_repository)],
+) -> WorkspaceService:
+    return WorkspaceService(repository)
+
+
+WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]

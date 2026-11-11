@@ -1,10 +1,14 @@
-# Day 4: Task Authorization
+# Historical Day 3 follow-up: Task Authorization
+
+> This document records the Task Authorization follow-up completed after Day 3.
+> The Day 4 Workspace Management scope is documented in
+> [day4-workspace-management.md](day4-workspace-management.md).
 
 ## Purpose and baseline
 
-Day 4 adds authorization to the task API already built in Day 3. The baseline is commit `5041574` (Day 3), with the browser auth client and its flow test restored from `0035e56`. This specification is limited to the first authorization slice: task access governed by a user's workspace membership and the task's project/workspace parent chain.
+The Task Authorization follow-up adds authorization to the task API built in Day 3. The baseline is commit `5041574` (Day 3), with the browser auth client and its flow test restored from `0035e56`. This historical specification is limited to task access governed by workspace membership and the task's project/workspace parent chain.
 
-The assignment screenshots (`pag1.png`–`pag4.png`) call for Bearer authentication, resource ownership, and ADMIN/OWNER/EDITOR/VIEWER authorization. The current code supplies users, workspaces, workspace memberships, projects, tasks, their role/status enums, auth dependencies, and task CRUD. Task routes are currently public; the task database repository still relies on seeded default project/user IDs. Day 4 must close those gaps without rebuilding the broader application described in the assignment.
+The assignment screenshots (`pag1.png`–`pag4.png`) call for Bearer authentication, resource ownership, and ADMIN/OWNER/EDITOR/VIEWER authorization. At the time, the code supplied users, workspaces, workspace memberships, projects, tasks, their role/status enums, auth dependencies, and task CRUD. Task routes were public; the task database repository relied on seeded default project/user IDs. This follow-up closed those gaps without rebuilding the broader application described in the assignment.
 
 ## Scope
 
@@ -64,7 +68,7 @@ The `/tasks` alias has identical behavior and remains hidden from OpenAPI as it 
 
 ## Browser auth client and test restored from Day 3
 
-Restore `examples/auth-client.js` and `examples/auth-client.test.mjs` from commit `0035e56` as part of Day 4. The Day 3 follow-up commit `5041574` deliberately deferred these files; they are part of the Day 4 deliverable, not optional cleanup.
+Restore `examples/auth-client.js` and `examples/auth-client.test.mjs` from commit `0035e56` as part of the Task Authorization follow-up. The Day 3 commit `5041574` deliberately deferred these files; they were part of that follow-up deliverable.
 
 - Preserve the source client's API: `createAuthClient({baseUrl, storage, fetchImpl})`, login/logout, authenticated request, and refresh behavior.
 - Persist only the short-lived access token under `taskhub_access_token`; never persist or expose the refresh token. Refresh remains cookie-based with `credentials: "include"`.
@@ -74,7 +78,7 @@ Restore `examples/auth-client.js` and `examples/auth-client.test.mjs` from commi
 
 ## Acceptance tests
 
-The Day 4 change is accepted when automated tests cover all of the following:
+The Task Authorization follow-up is accepted when automated tests cover all of the following:
 
 1. Each task endpoint and alias rejects absent, invalid, expired, refresh-type, and inactive-user credentials with 401 and the Bearer challenge; valid access tokens identify the expected user.
 2. An owner can list, create, read, update, and delete tasks in their workspace, including a legacy workspace whose `owner_id` has no OWNER membership row.

@@ -7,6 +7,13 @@ TASK_NOT_FOUND_MESSAGE = TASK_NOT_FOUND_DESCRIPTION
 PROJECT_NOT_FOUND_MESSAGE = "Project not found"
 INSUFFICIENT_WORKSPACE_ROLE_MESSAGE = "Insufficient workspace role"
 PROJECT_ARCHIVED_MESSAGE = "Project is archived"
+WORKSPACE_NOT_FOUND_MESSAGE = "Workspace not found"
+WORKSPACE_MEMBER_NOT_FOUND_MESSAGE = "Workspace member not found"
+WORKSPACE_OWNER_ALREADY_MEMBER_MESSAGE = "Workspace owner is already a member"
+WORKSPACE_ALREADY_MEMBER_MESSAGE = "User is already a workspace member"
+WORKSPACE_OWNER_ROLE_CHANGE_MESSAGE = "Workspace owner role cannot be changed"
+WORKSPACE_OWNER_REMOVE_MESSAGE = "Workspace owner cannot be removed"
+WORKSPACE_OWNER_ROLE_RESERVED_MESSAGE = "Workspace OWNER role is reserved for the owner"
 
 EXPLICIT_NULL_MESSAGE = "must not be null; omit the field to leave it unchanged"
 

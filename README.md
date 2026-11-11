@@ -88,6 +88,11 @@ cần `Authorization: Bearer <access_token>`. Quyền dựa trên owner hoặc m
 của workspace chứa project; OWNER/EDITOR được ghi, VIEWER chỉ được đọc. Resource
 ngoài workspace bị ẩn bằng 404; VIEWER ghi vào resource nhìn thấy nhận 403.
 
+Workspace API: `POST/GET /api/v1/workspaces`, `GET/PATCH/DELETE
+/api/v1/workspaces/{id}`, cùng `/members` và `/members/{user_id}`. Owner tạo
+workspace, mời user đang hoạt động làm EDITOR/VIEWER, đổi role và xóa member;
+OWNER không thể bị đổi role hoặc xóa. Mọi endpoint cần Bearer access token.
+
 Browser client tối giản nằm ở `examples/auth-client.js`. Client chỉ lưu access
 token ngắn hạn trong `localStorage` dưới key `taskhub_access_token`; JavaScript
 có thể đọc localStorage, nên dùng HTTPS và chỉ giữ access token ngắn hạn. Refresh
@@ -216,5 +221,6 @@ taskhub/
 - Repository SQLAlchemy async persist vào PostgreSQL; `InMemoryTaskRepository` vẫn có thể dùng trong unit test.
 - Service không import FastAPI → dễ unit test, dễ tái sử dụng.
 - `TaskNotFoundError` được dịch thành HTTP 404 tại composition root (`app/main.py`).
-- API phân giải principal/HTTP; service điều phối transaction, cập nhật domain và lỗi task thiếu; repository kiểm tra quyền/phạm vi và khóa hàng cùng thao tác lưu.
+- API phân giải principal/HTTP; service điều phối transaction, cập nhật domain và dịch lỗi thiếu resource; policy thuần quyết định RBAC; repository scope query, khóa hàng và persist trong transaction.
+- Workspace write khóa workspace rồi membership; lookup membership riêng giữ hỗ trợ owner legacy không có membership row và duy trì thứ tự khóa an toàn.
 - Timestamp luôn timezone-aware UTC.
