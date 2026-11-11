@@ -1,15 +1,11 @@
 """Current account profile endpoints."""
 
-from typing import Annotated
+from fastapi import APIRouter, status
 
-from fastapi import APIRouter, Depends, status
-
-from app.core.deps import AuthServiceDep, get_current_user
-from app.models.entities import User
+from app.core.deps import AuthServiceDep, CurrentUserDep
 from app.schemas.user import ChangePasswordRequest, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
-CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 @router.get(
@@ -17,7 +13,7 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
     response_model=UserRead,
     responses={401: {"description": "Not authenticated"}},
 )
-async def get_me(user: CurrentUser) -> UserRead:
+async def get_me(user: CurrentUserDep) -> UserRead:
     return UserRead.model_validate(user)
 
 
@@ -31,7 +27,7 @@ async def get_me(user: CurrentUser) -> UserRead:
 )
 async def update_me(
     payload: UserUpdate,
-    user: CurrentUser,
+    user: CurrentUserDep,
     service: AuthServiceDep,
 ) -> UserRead:
     updated = await service.update_profile(user, payload.model_dump(exclude_unset=True))
@@ -45,7 +41,7 @@ async def update_me(
 )
 async def change_password(
     payload: ChangePasswordRequest,
-    user: CurrentUser,
+    user: CurrentUserDep,
     service: AuthServiceDep,
 ):
     await service.change_password(user, payload.current_password, payload.new_password)

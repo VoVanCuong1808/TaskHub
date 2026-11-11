@@ -11,7 +11,6 @@ from collections.abc import Awaitable
 from typing import TypeVar
 from uuid import UUID
 
-from app.core.exceptions import TaskNotFoundError
 from app.models.enums import TaskStatus
 from app.models.task import Task
 from app.repositories.task_repo import TaskRepositoryProtocol
@@ -66,16 +65,11 @@ class TaskService:
         )
 
     async def get(self, task_id: UUID, user_id: UUID) -> Task:
-        task = await self._repository.get(task_id, user_id=user_id)
-        if task is None:
-            raise TaskNotFoundError(task_id)
-        return task
+        return await self._repository.get(task_id, user_id=user_id)
 
     async def update(self, task_id: UUID, payload: TaskUpdate, user_id: UUID) -> Task:
         async def operation() -> Task:
             task = await self._repository.get_for_update(task_id, user_id=user_id)
-            if task is None:
-                raise TaskNotFoundError(task_id)
             for attribute, value in payload.model_dump(exclude_unset=True).items():
                 setattr(task, attribute, value)
             task.touch()
@@ -84,7 +78,4 @@ class TaskService:
         return await self._transaction(operation())
 
     async def delete(self, task_id: UUID, user_id: UUID) -> None:
-        if not await self._transaction(
-            self._repository.delete(task_id, user_id=user_id)
-        ):
-            raise TaskNotFoundError(task_id)
+        await self._transaction(self._repository.delete(task_id, user_id=user_id))
