@@ -31,6 +31,7 @@ class TaskPayloadBase(BaseModel):
 
 
 class TaskCreate(TaskPayloadBase):
+    project_id: UUID
     title: str = Field(min_length=TITLE_MIN_LENGTH, max_length=TITLE_MAX_LENGTH)
     description: str = Field(default="", max_length=DESCRIPTION_MAX_LENGTH)
     status: TaskStatus = TaskStatus.TODO
@@ -54,6 +55,7 @@ class TaskRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    project_id: UUID
     title: str
     description: str | None
     status: TaskStatus

@@ -25,6 +25,8 @@ class Task:
     description: str | None = None
     status: TaskStatus = TaskStatus.TODO
     id: UUID = field(default_factory=uuid4)
+    project_id: UUID | None = None
+    created_by: UUID | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

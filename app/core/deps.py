@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.core.constants import AUTH_NOT_AUTHENTICATED_MESSAGE
 from app.core.exceptions import AuthenticationError
 from app.db.base import get_db
+from app.models.entities import User
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
@@ -72,7 +73,10 @@ AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     service: AuthServiceDep,
-):
+) -> User:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AuthenticationError(AUTH_NOT_AUTHENTICATED_MESSAGE)
     return await service.authenticate_access(credentials.credentials)
+
+
+CurrentUserDep = Annotated[User, Depends(get_current_user)]

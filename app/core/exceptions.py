@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.core.constants import TASK_NOT_FOUND_MESSAGE
-
 
 class AuthenticationError(Exception):
     """Authentication failed or the supplied token is no longer valid."""
@@ -19,4 +17,25 @@ class TaskNotFoundError(Exception):
 
     def __init__(self, task_id: UUID | str) -> None:
         self.task_id = task_id
-        super().__init__(TASK_NOT_FOUND_MESSAGE.format(task_id=task_id))
+        super().__init__("Task not found")
+
+
+class ProjectNotFoundError(Exception):
+    """Raised when a project is missing or outside the caller's visibility."""
+
+    def __init__(self) -> None:
+        super().__init__("Project not found")
+
+
+class PermissionDeniedError(Exception):
+    """An authenticated workspace member lacks the required workspace role."""
+
+    def __init__(self) -> None:
+        super().__init__("Insufficient workspace role")
+
+
+class ProjectArchivedError(Exception):
+    """A task write was attempted in an archived project."""
+
+    def __init__(self) -> None:
+        super().__init__("Project is archived")

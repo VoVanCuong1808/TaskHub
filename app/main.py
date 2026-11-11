@@ -27,7 +27,13 @@ from app.core.constants import (
     INTEGRITY_REQUIRED_MESSAGE,
     INTEGRITY_RESTRICTED_MESSAGE,
 )
-from app.core.exceptions import AuthenticationError, TaskNotFoundError
+from app.core.exceptions import (
+    AuthenticationError,
+    PermissionDeniedError,
+    ProjectArchivedError,
+    ProjectNotFoundError,
+    TaskNotFoundError,
+)
 from app.db.base import make_engine, make_session_factory
 from app.db.seed import seed_default_data
 
@@ -141,6 +147,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, exc: TaskNotFoundError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ProjectNotFoundError)
+    async def project_not_found_handler(
+        request: Request, exc: ProjectNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(PermissionDeniedError)
+    async def permission_denied_handler(
+        request: Request, exc: PermissionDeniedError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(ProjectArchivedError)
+    async def project_archived_handler(
+        request: Request, exc: ProjectArchivedError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(AuthenticationError)
     async def authentication_error_handler(
