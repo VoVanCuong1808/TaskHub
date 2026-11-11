@@ -5,6 +5,10 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.authorization import (
+    has_workspace_permission,
+    is_workspace_write_permission,
+)
 from app.core.exceptions import (
     PermissionDeniedError,
     ProjectArchivedError,
@@ -14,7 +18,12 @@ from app.core.exceptions import (
 from app.models.entities import Project as ProjectRow
 from app.models.entities import Task as TaskRow
 from app.models.entities import Workspace, WorkspaceMember
-from app.models.enums import ProjectStatus, TaskStatus, WorkspaceRole
+from app.models.enums import (
+    ProjectStatus,
+    TaskStatus,
+    WorkspacePermission,
+    WorkspaceRole,
+)
 from app.models.task import Task
 
 
@@ -44,10 +53,14 @@ class TaskRepository:
         )
 
     async def _authorize_project(
-        self, project_id: UUID, user_id: UUID, *, write: bool = False
+        self,
+        project_id: UUID,
+        user_id: UUID,
+        permission: WorkspacePermission,
     ) -> ProjectRow:
+        is_write = is_workspace_write_permission(permission)
         project_query = select(ProjectRow).where(ProjectRow.id == project_id)
-        if write:
+        if is_write:
             project_query = project_query.with_for_update()
         project = await self.session.scalar(
             project_query.execution_options(populate_existing=True)
@@ -56,7 +69,7 @@ class TaskRepository:
             raise ProjectNotFoundError()
         # Writes lock task (when present), then project, workspace, membership.
         workspace_query = select(Workspace).where(Workspace.id == project.workspace_id)
-        if write:
+        if is_write:
             workspace_query = workspace_query.with_for_update()
         workspace = await self.session.scalar(
             workspace_query.execution_options(populate_existing=True)
@@ -67,7 +80,7 @@ class TaskRepository:
             WorkspaceMember.workspace_id == workspace.id,
             WorkspaceMember.user_id == user_id,
         )
-        if write:
+        if is_write:
             member_query = member_query.with_for_update()
         member = await self.session.scalar(
             member_query.execution_options(populate_existing=True)
@@ -76,14 +89,16 @@ class TaskRepository:
         if not owner and member is None:
             raise ProjectNotFoundError()
         role = WorkspaceRole.OWNER if owner else member.role
-        if write and project.status == ProjectStatus.ARCHIVED:
+        if is_write and project.status == ProjectStatus.ARCHIVED:
             raise ProjectArchivedError()
-        if write and role == WorkspaceRole.VIEWER:
+        if not has_workspace_permission(role, permission):
             raise PermissionDeniedError()
         return project
 
     async def add(self, task: Task, *, project_id: UUID, user_id: UUID) -> Task:
-        await self._authorize_project(project_id, user_id, write=True)
+        await self._authorize_project(
+            project_id, user_id, WorkspacePermission.TASK_CREATE
+        )
         row = TaskRow(
             id=task.id,
             project_id=project_id,
@@ -108,7 +123,9 @@ class TaskRepository:
         offset: int = 0,
         limit: int = 100,
     ) -> tuple[list[Task], int]:
-        await self._authorize_project(project_id, user_id)
+        await self._authorize_project(
+            project_id, user_id, WorkspacePermission.TASK_READ
+        )
         query = select(TaskRow).where(TaskRow.project_id == project_id)
         count_query = (
             select(func.count())
@@ -124,26 +141,34 @@ class TaskRepository:
         return [self._domain(row) for row in rows], total
 
     async def _authorize_task(
-        self, task_id: UUID, user_id: UUID, *, write: bool
+        self,
+        task_id: UUID,
+        user_id: UUID,
+        permission: WorkspacePermission,
     ) -> TaskRow:
+        is_write = is_workspace_write_permission(permission)
         query = select(TaskRow).where(TaskRow.id == task_id)
-        if write:
+        if is_write:
             query = query.with_for_update()
         row = await self.session.scalar(query.execution_options(populate_existing=True))
         if row is None:
             raise TaskNotFoundError(task_id)
         try:
-            await self._authorize_project(row.project_id, user_id, write=write)
+            await self._authorize_project(row.project_id, user_id, permission)
         except ProjectNotFoundError:
             raise TaskNotFoundError(task_id) from None
         return row
 
     async def get(self, task_id: UUID, *, user_id: UUID) -> Task:
-        row = await self._authorize_task(task_id, user_id, write=False)
+        row = await self._authorize_task(
+            task_id, user_id, WorkspacePermission.TASK_READ
+        )
         return self._domain(row)
 
     async def get_for_update(self, task_id: UUID, *, user_id: UUID) -> Task:
-        row = await self._authorize_task(task_id, user_id, write=True)
+        row = await self._authorize_task(
+            task_id, user_id, WorkspacePermission.TASK_UPDATE
+        )
         return self._domain(row)
 
     async def save(self, task: Task) -> Task:
@@ -164,7 +189,9 @@ class TaskRepository:
         return self._domain(row)
 
     async def delete(self, task_id: UUID, *, user_id: UUID) -> bool:
-        row = await self._authorize_task(task_id, user_id, write=True)
+        row = await self._authorize_task(
+            task_id, user_id, WorkspacePermission.TASK_DELETE
+        )
         await self.session.delete(row)
         await self.session.flush()
         return True

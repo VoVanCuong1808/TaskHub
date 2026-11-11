@@ -27,6 +27,15 @@ class WorkspaceRole(str, Enum):
     VIEWER = "viewer"
 
 
+class WorkspacePermission(str, Enum):
+    """Static permissions used by workspace-scoped task operations."""
+
+    TASK_READ = "task:read"
+    TASK_CREATE = "task:create"
+    TASK_UPDATE = "task:update"
+    TASK_DELETE = "task:delete"
+
+
 class ProjectStatus(str, Enum):
     """Project lifecycle states."""
 
