@@ -83,14 +83,29 @@ tab dùng lại token cũ và đăng xuất các tab/thiết bị còn lại; �
 single-flight refresh và tuần tự hóa các thao tác auth giữa các tab.
 Đăng ký luôn cấp role `member`; profile không cho sửa
 role, trạng thái hoạt động hoặc mật khẩu. Logout và đổi mật khẩu thu hồi refresh
-tokens; access token đã phát hành còn hiệu lực tới khi hết hạn. Task endpoints hiện
-vẫn public; dự kiến Day 4 sẽ yêu cầu Bearer token và kiểm tra quyền theo
-workspace/project khi phần authorization đó được triển khai.
+tokens; access token đã phát hành còn hiệu lực tới khi hết hạn. Mọi task endpoint
+cần `Authorization: Bearer <access_token>`. Quyền dựa trên owner hoặc membership
+của workspace chứa project; OWNER/EDITOR được ghi, VIEWER chỉ được đọc. Resource
+ngoài workspace bị ẩn bằng 404; VIEWER ghi vào resource nhìn thấy nhận 403.
 
-Browser integration được hoãn tới Day 4. Với frontend khác origin, cấu hình
-origin chính xác, ví dụ `TASKHUB_FRONTEND_ORIGINS='["https://app.example.com"]'`.
-Cookie cross-origin cần cùng site (cùng eTLD+1); `SameSite=None` chỉ dùng cùng
-với Secure và HTTPS.
+Browser client tối giản nằm ở `examples/auth-client.js`. Client chỉ lưu access
+token ngắn hạn trong `localStorage` dưới key `taskhub_access_token`; JavaScript
+có thể đọc localStorage, nên dùng HTTPS và chỉ giữ access token ngắn hạn. Refresh
+token vẫn nằm trong cookie HttpOnly; refresh luôn gửi `credentials: "include"`.
+Request được gắn Bearer token, refresh rồi retry đúng một lần sau 401. Refresh
+được single-flight và các auth mutation được tuần tự hóa trong từng tab; client
+không đồng bộ refresh giữa các tab, nên vẫn có thể xảy ra race giữa nhiều tab.
+
+```js
+import { createAuthClient } from "./examples/auth-client.js";
+const auth = createAuthClient({ baseUrl: "https://api.example.com/api/v1" });
+await auth.login(email, password);
+const response = await auth.request(`/tasks?project_id=${projectId}`);
+```
+
+Với frontend khác origin, cấu hình origin chính xác, ví dụ
+`TASKHUB_FRONTEND_ORIGINS='["https://app.example.com"]'`. Cookie cross-origin
+cần cùng site (cùng eTLD+1); `SameSite=None` chỉ dùng cùng Secure và HTTPS.
 
 Trong PowerShell local HTTP, có thể opt out Secure rõ ràng:
 
@@ -104,8 +119,8 @@ không nhận refresh token trong JSON hoặc Authorization header.
 
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
-| POST   | `/api/v1/tasks`       | 201    | Tạo task                      |
-| GET    | `/api/v1/tasks`       | 200    | Danh sách và `total` (`status`, `offset`, `limit`) |
+| POST   | `/api/v1/tasks`       | 201    | Tạo task trong `project_id`   |
+| GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`status`, `offset`, `limit`) |
 | GET    | `/api/v1/tasks/{id}`  | 200/404| Chi tiết                      |
 | PATCH  | `/api/v1/tasks/{id}`  | 200/404| Cập nhật một phần             |
 | DELETE | `/api/v1/tasks/{id}`  | 204/404| Xoá                           |
@@ -113,14 +128,21 @@ không nhận refresh token trong JSON hoặc Authorization header.
 Ví dụ:
 
 ```powershell
-$body = @{ title = "Viết README"; description = "Mô tả dự án" } | ConvertTo-Json
+$login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/auth/login `
+  -ContentType "application/json" -Body (@{ email = "you@example.com"; password = "<password>" } | ConvertTo-Json)
+$accessToken = $login.access_token
+$headers = @{ Authorization = "Bearer $accessToken" }
+$projectId = "<UUID của project bạn có quyền truy cập>"
+$body = @{ project_id = $projectId; title = "Viết README"; description = "Mô tả dự án" } | ConvertTo-Json
 $task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/tasks `
-  -ContentType "application/json" -Body $body
+  -Headers $headers -ContentType "application/json" -Body $body
+
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId" -Headers $headers
 
 Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" `
-  -ContentType "application/json" -Body (@{ status = "done" } | ConvertTo-Json)
+  -Headers $headers -ContentType "application/json" -Body (@{ status = "done" } | ConvertTo-Json)
 
-Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)"
+Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" -Headers $headers
 ```
 
 ## Cấu hình
@@ -182,6 +204,7 @@ taskhub/
 │   ├── services/                # task and auth business rules
 │   └── main.py                  # app factory, middleware, exception handlers
 ├── alembic/versions/            # schema migrations
+├── examples/                    # browser auth client and flow test
 ├── tests/                       # unit and PostgreSQL integration tests
 ├── pyproject.toml
 ├── .python-version
@@ -193,4 +216,5 @@ taskhub/
 - Repository SQLAlchemy async persist vào PostgreSQL; `InMemoryTaskRepository` vẫn có thể dùng trong unit test.
 - Service không import FastAPI → dễ unit test, dễ tái sử dụng.
 - `TaskNotFoundError` được dịch thành HTTP 404 tại composition root (`app/main.py`).
+- API phân giải principal/HTTP; service điều phối transaction, cập nhật domain và lỗi task thiếu; repository kiểm tra quyền/phạm vi và khóa hàng cùng thao tác lưu.
 - Timestamp luôn timezone-aware UTC.

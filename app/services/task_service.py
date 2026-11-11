@@ -32,45 +32,59 @@ class TaskService:
         try:
             result = await operation
             await self._repository.commit()
-        except Exception:
+        except BaseException:
             logger.warning("Task transaction failed; rolling back")
             await self._repository.rollback()
             raise
         return result
 
-    async def create(self, payload: TaskCreate) -> Task:
+    async def create(self, payload: TaskCreate, user_id: UUID) -> Task:
         task = Task(
             title=payload.title,
             description=payload.description,
             status=payload.status,
         )
-        return await self._transaction(self._repository.add(task))
+        return await self._transaction(
+            self._repository.add(task, project_id=payload.project_id, user_id=user_id)
+        )
 
     async def list(
         self,
         *,
+        project_id: UUID,
+        user_id: UUID,
         status: TaskStatus | None = None,
         offset: int = 0,
         limit: int = 100,
     ) -> tuple[list[Task], int]:
-        return await self._repository.list(status=status, offset=offset, limit=limit)
+        return await self._repository.list(
+            project_id=project_id,
+            user_id=user_id,
+            status=status,
+            offset=offset,
+            limit=limit,
+        )
 
-    async def get(self, task_id: UUID) -> Task:
-        task = await self._repository.get(task_id)
+    async def get(self, task_id: UUID, user_id: UUID) -> Task:
+        task = await self._repository.get(task_id, user_id=user_id)
         if task is None:
             raise TaskNotFoundError(task_id)
         return task
 
-    async def update(self, task_id: UUID, payload: TaskUpdate) -> Task:
-        task = await self._repository.get_for_update(task_id)
-        if task is None:
-            raise TaskNotFoundError(task_id)
-        changes = payload.model_dump(exclude_unset=True)
-        for attribute, value in changes.items():
-            setattr(task, attribute, value)
-        task.touch()
-        return await self._transaction(self._repository.save(task))
+    async def update(self, task_id: UUID, payload: TaskUpdate, user_id: UUID) -> Task:
+        async def operation() -> Task:
+            task = await self._repository.get_for_update(task_id, user_id=user_id)
+            if task is None:
+                raise TaskNotFoundError(task_id)
+            for attribute, value in payload.model_dump(exclude_unset=True).items():
+                setattr(task, attribute, value)
+            task.touch()
+            return await self._repository.save(task)
 
-    async def delete(self, task_id: UUID) -> None:
-        if not await self._transaction(self._repository.delete(task_id)):
+        return await self._transaction(operation())
+
+    async def delete(self, task_id: UUID, user_id: UUID) -> None:
+        if not await self._transaction(
+            self._repository.delete(task_id, user_id=user_id)
+        ):
             raise TaskNotFoundError(task_id)
