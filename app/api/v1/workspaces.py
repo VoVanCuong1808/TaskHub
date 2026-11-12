@@ -6,11 +6,10 @@ from uuid import UUID
 from fastapi import APIRouter, Query, Response, status
 
 from app.core.deps import CurrentUserDep, WorkspaceServiceDep
+from app.schemas.common import Page, PaginationParams
 from app.schemas.workspace import (
     WorkspaceCreate,
-    WorkspaceListRead,
     WorkspaceMemberCreate,
-    WorkspaceMemberListRead,
     WorkspaceMemberRead,
     WorkspaceMemberUpdate,
     WorkspaceRead,
@@ -27,17 +26,16 @@ async def create_workspace(
     return WorkspaceRead.model_validate(await service.create(payload.name, user.id))
 
 
-@router.get("", response_model=WorkspaceListRead)
+@router.get("", response_model=Page[WorkspaceRead])
 async def list_workspaces(
     service: WorkspaceServiceDep,
     user: CurrentUserDep,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 100,
-) -> WorkspaceListRead:
+    pagination: Annotated[PaginationParams, Query()],
+) -> Page[WorkspaceRead]:
     workspaces, total = await service.list(
-        user.id, offset=offset, limit=limit
+        user.id, offset=pagination.offset, limit=pagination.limit
     )
-    return WorkspaceListRead(
+    return Page[WorkspaceRead](
         items=[WorkspaceRead.model_validate(item) for item in workspaces],
         total=total,
     )
@@ -71,19 +69,21 @@ async def delete_workspace(
 
 
 @router.get(
-    "/{workspace_id}/members", response_model=WorkspaceMemberListRead
+    "/{workspace_id}/members", response_model=Page[WorkspaceMemberRead]
 )
 async def list_workspace_members(
     workspace_id: UUID,
     service: WorkspaceServiceDep,
     user: CurrentUserDep,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 100,
-) -> WorkspaceMemberListRead:
+    pagination: Annotated[PaginationParams, Query()],
+) -> Page[WorkspaceMemberRead]:
     members, total = await service.list_members(
-        workspace_id, user.id, offset=offset, limit=limit
+        workspace_id,
+        user.id,
+        offset=pagination.offset,
+        limit=pagination.limit,
     )
-    return WorkspaceMemberListRead(
+    return Page[WorkspaceMemberRead](
         items=[WorkspaceMemberRead.model_validate(item) for item in members],
         total=total,
     )

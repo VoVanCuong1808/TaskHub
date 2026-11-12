@@ -49,11 +49,6 @@ class WorkspaceRead(BaseModel):
     updated_at: datetime
 
 
-class WorkspaceListRead(BaseModel):
-    items: list[WorkspaceRead]
-    total: int
-
-
 class WorkspaceMemberWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: Literal[WorkspaceRole.EDITOR, WorkspaceRole.VIEWER]
@@ -74,8 +69,3 @@ class WorkspaceMemberRead(BaseModel):
     role: WorkspaceRole
     created_at: datetime
     updated_at: datetime
-
-
-class WorkspaceMemberListRead(BaseModel):
-    items: list[WorkspaceMemberRead]
-    total: int
