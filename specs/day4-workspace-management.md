@@ -30,11 +30,14 @@ Day 3 follow-up in [day4-authorization.md](day4-authorization.md).
 
 ## Persistence and concurrency
 
-- Repository queries scope visibility and enforce authorization. Writes lock
-  the workspace first and membership rows afterward, then persist in the same
-  service transaction. Failed writes roll back. This workspace/membership order
-  serializes role changes and removals with task authorization, which also locks
-  the membership row before committing a task write.
+- The service applies a pure role policy to repository-loaded workspace and
+  membership data. The repository only queries, locks, and persists. Writes lock
+  the workspace first, then actor and target membership rows, and persist in the
+  same service-owned unit of work. Failed writes roll back. This order serializes
+  role changes and removals with task authorization, which also locks membership
+  before committing a task write. Reads do not lock rows.
+- Workspace and member list endpoints accept `offset` and `limit` and return
+  `{items, total}`, where `total` counts the complete visible/authorized set.
 - Preserve the existing schema and task authorization behavior.
 
 ## Acceptance

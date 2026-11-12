@@ -36,6 +36,7 @@ from app.db.seed import (
     DEFAULT_WORKSPACE_ID,
     seed_default_data,
 )
+from app.db.workspace_uow import SQLAlchemyWorkspaceUnitOfWork
 from app.main import create_app, integrity_error_response
 from app.models.entities import (
     Comment,
@@ -60,7 +61,6 @@ from app.models.enums import (
 from app.models.task import Task
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
-from app.repositories.workspace_repository import WorkspaceRepository
 from app.schemas.task import TaskUpdate
 from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
@@ -605,6 +605,14 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
 
             listed = client.get("/api/v1/workspaces", headers=headers)
             self.assertIn(workspace_id, [UUID(item["id"]) for item in listed.json()["items"]])
+            self.assertEqual(listed.json()["total"], 2)
+            workspace_page = client.get(
+                "/api/v1/workspaces",
+                params={"offset": 1, "limit": 1},
+                headers=headers,
+            ).json()
+            self.assertEqual(len(workspace_page["items"]), 1)
+            self.assertEqual(workspace_page["total"], 2)
             self.assertEqual(client.get(f"/api/v1/workspaces/{workspace_id}", headers=headers).status_code, 200)
             renamed = client.patch(
                 f"/api/v1/workspaces/{workspace_id}",
@@ -623,7 +631,15 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(create_app(self._workspace_settings(data.secret))) as client:
             members = client.get(member_path, headers=headers)
             self.assertEqual(members.status_code, 200)
-            self.assertEqual(len(members.json()), 3)
+            self.assertEqual(len(members.json()["items"]), 3)
+            self.assertEqual(members.json()["total"], 3)
+            member_page = client.get(
+                member_path,
+                params={"offset": 1, "limit": 1},
+                headers=headers,
+            ).json()
+            self.assertEqual(len(member_page["items"]), 1)
+            self.assertEqual(member_page["total"], 3)
             invite = client.post(
                 member_path,
                 headers=headers,
@@ -655,7 +671,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                         headers=headers,
                         json={"email": email, "role": "owner"},
                     ).status_code,
-                    404,
+                    422,
                 )
             self.assertEqual(
                 client.post(
@@ -663,11 +679,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                     headers=headers,
                     json={"email": data.outsider.email, "role": "owner"},
                 ).status_code,
-                409,
+                422,
             )
             self.assertEqual(
                 client.post(member_path, headers=headers, json={"email": data.invitee.email, "role": "owner"}).status_code,
-                409,
+                422,
             )
             self.assertEqual(
                 client.patch(f"{member_path}/{data.owner.id}", headers=headers, json={"role": "editor"}).status_code,
@@ -675,7 +691,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 client.patch(f"{member_path}/{data.viewer.id}", headers=headers, json={"role": "owner"}).status_code,
-                409,
+                422,
             )
             self.assertEqual(client.delete(f"{member_path}/{data.owner.id}", headers=headers).status_code, 409)
 
@@ -695,7 +711,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 client.patch(f"{member_path}/{missing_id}", headers=headers, json={"role": "owner"}).status_code,
-                404,
+                422,
             )
 
     async def test_workspace_member_role_403_and_cross_workspace_404(self) -> None:
@@ -721,7 +737,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                         headers=headers,
                         json={"role": "owner"},
                     ).status_code,
-                    403,
+                    422,
                 )
 
             for user in (data.outsider, data.admin):
@@ -744,7 +760,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                         headers=headers,
                         json={"role": "owner"},
                     ).status_code,
-                    404,
+                    422,
                 )
             owner_headers = self._workspace_headers(data.owner, data.secret)
             missing_id = uuid4()
@@ -831,7 +847,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         data = await self._make_workspace_fixture()
         with self.assertRaises(DBAPIError):
             async with self.session_factory() as session:
-                await WorkspaceService(WorkspaceRepository(session)).update(
+                await WorkspaceService(SQLAlchemyWorkspaceUnitOfWork(session)).update(
                     data.workspace.id, data.owner.id, "x" * 201
                 )
         async with self.session_factory() as session:
@@ -860,7 +876,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             async with self.session_factory() as session:
                 remover_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 remover_pid_ready.set()
-                await WorkspaceService(WorkspaceRepository(session)).remove_member(
+                await WorkspaceService(SQLAlchemyWorkspaceUnitOfWork(session)).remove_member(
                     data.workspace.id, data.owner.id, data.editor.id
                 )
 

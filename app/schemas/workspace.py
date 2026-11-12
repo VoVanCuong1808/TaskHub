@@ -1,7 +1,7 @@
 """Workspace and membership API schemas."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -56,7 +56,7 @@ class WorkspaceListRead(BaseModel):
 
 class WorkspaceMemberWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    role: WorkspaceRole
+    role: Literal[WorkspaceRole.EDITOR, WorkspaceRole.VIEWER]
 
 
 class WorkspaceMemberCreate(WorkspaceMemberWrite):
@@ -74,3 +74,8 @@ class WorkspaceMemberRead(BaseModel):
     role: WorkspaceRole
     created_at: datetime
     updated_at: datetime
+
+
+class WorkspaceMemberListRead(BaseModel):
+    items: list[WorkspaceMemberRead]
+    total: int

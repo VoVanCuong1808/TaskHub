@@ -16,13 +16,14 @@ from app.core.config import Settings
 from app.core.constants import AUTH_NOT_AUTHENTICATED_MESSAGE
 from app.core.exceptions import AuthenticationError
 from app.db.base import get_db
+from app.db.workspace_uow import SQLAlchemyWorkspaceUnitOfWork
 from app.models.entities import User
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
-from app.repositories.workspace_repository import WorkspaceRepository
 from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
 from app.services.workspace_service import WorkspaceService
+from app.services.workspace_uow import WorkspaceUnitOfWork
 
 
 def get_task_repository(
@@ -84,16 +85,16 @@ async def get_current_user(
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 
-def get_workspace_repository(
+def get_workspace_unit_of_work(
     session: Annotated[AsyncSession, Depends(get_db)],
-) -> WorkspaceRepository:
-    return WorkspaceRepository(session)
+) -> WorkspaceUnitOfWork:
+    return SQLAlchemyWorkspaceUnitOfWork(session)
 
 
 def get_workspace_service(
-    repository: Annotated[WorkspaceRepository, Depends(get_workspace_repository)],
+    uow: Annotated[WorkspaceUnitOfWork, Depends(get_workspace_unit_of_work)],
 ) -> WorkspaceService:
-    return WorkspaceService(repository)
+    return WorkspaceService(uow)
 
 
 WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]

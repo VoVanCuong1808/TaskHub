@@ -1,14 +1,16 @@
 """Workspace management HTTP endpoints."""
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.core.deps import CurrentUserDep, WorkspaceServiceDep
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceListRead,
     WorkspaceMemberCreate,
+    WorkspaceMemberListRead,
     WorkspaceMemberRead,
     WorkspaceMemberUpdate,
     WorkspaceRead,
@@ -22,17 +24,22 @@ router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 async def create_workspace(
     payload: WorkspaceCreate, service: WorkspaceServiceDep, user: CurrentUserDep
 ) -> WorkspaceRead:
-    return WorkspaceRead.model_validate(await service.create(payload.name, user))
+    return WorkspaceRead.model_validate(await service.create(payload.name, user.id))
 
 
 @router.get("", response_model=WorkspaceListRead)
 async def list_workspaces(
-    service: WorkspaceServiceDep, user: CurrentUserDep
+    service: WorkspaceServiceDep,
+    user: CurrentUserDep,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
 ) -> WorkspaceListRead:
-    workspaces = await service.list(user.id)
+    workspaces, total = await service.list(
+        user.id, offset=offset, limit=limit
+    )
     return WorkspaceListRead(
         items=[WorkspaceRead.model_validate(item) for item in workspaces],
-        total=len(workspaces),
+        total=total,
     )
 
 
@@ -64,13 +71,22 @@ async def delete_workspace(
 
 
 @router.get(
-    "/{workspace_id}/members", response_model=list[WorkspaceMemberRead]
+    "/{workspace_id}/members", response_model=WorkspaceMemberListRead
 )
 async def list_workspace_members(
-    workspace_id: UUID, service: WorkspaceServiceDep, user: CurrentUserDep
-) -> list[WorkspaceMemberRead]:
-    members = await service.list_members(workspace_id, user.id)
-    return [WorkspaceMemberRead.model_validate(item) for item in members]
+    workspace_id: UUID,
+    service: WorkspaceServiceDep,
+    user: CurrentUserDep,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+) -> WorkspaceMemberListRead:
+    members, total = await service.list_members(
+        workspace_id, user.id, offset=offset, limit=limit
+    )
+    return WorkspaceMemberListRead(
+        items=[WorkspaceMemberRead.model_validate(item) for item in members],
+        total=total,
+    )
 
 
 @router.post(
