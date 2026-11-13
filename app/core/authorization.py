@@ -15,6 +15,15 @@ WORKSPACE_ROLE_PERMISSIONS: Final = MappingProxyType(
                 WorkspacePermission.TASK_CREATE,
                 WorkspacePermission.TASK_UPDATE,
                 WorkspacePermission.TASK_DELETE,
+                WorkspacePermission.LABEL_READ,
+                WorkspacePermission.LABEL_CREATE,
+                WorkspacePermission.LABEL_UPDATE,
+                WorkspacePermission.LABEL_DELETE,
+                WorkspacePermission.TASK_LABEL_UPDATE,
+                WorkspacePermission.COMMENT_READ,
+                WorkspacePermission.COMMENT_CREATE,
+                WorkspacePermission.COMMENT_UPDATE,
+                WorkspacePermission.COMMENT_DELETE,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
             }
@@ -22,6 +31,8 @@ WORKSPACE_ROLE_PERMISSIONS: Final = MappingProxyType(
         WorkspaceRole.VIEWER: frozenset(
             {
                 WorkspacePermission.TASK_READ,
+                WorkspacePermission.LABEL_READ,
+                WorkspacePermission.COMMENT_READ,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
             }
@@ -33,6 +44,13 @@ WORKSPACE_WRITE_PERMISSIONS: Final = frozenset(
         WorkspacePermission.TASK_CREATE,
         WorkspacePermission.TASK_UPDATE,
         WorkspacePermission.TASK_DELETE,
+        WorkspacePermission.LABEL_CREATE,
+        WorkspacePermission.LABEL_UPDATE,
+        WorkspacePermission.LABEL_DELETE,
+        WorkspacePermission.TASK_LABEL_UPDATE,
+        WorkspacePermission.COMMENT_CREATE,
+        WorkspacePermission.COMMENT_UPDATE,
+        WorkspacePermission.COMMENT_DELETE,
         WorkspacePermission.WORKSPACE_UPDATE,
         WorkspacePermission.WORKSPACE_DELETE,
         WorkspacePermission.MEMBER_INVITE,

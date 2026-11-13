@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 
 from app.core.constants import (
+    DEFAULT_PAGE_LIMIT,
     WORKSPACE_ALREADY_MEMBER_MESSAGE,
     WORKSPACE_OWNER_ALREADY_MEMBER_MESSAGE,
     WORKSPACE_OWNER_REMOVE_MESSAGE,
@@ -94,7 +95,7 @@ class WorkspaceService:
         return workspace
 
     async def list(
-        self, user_id: UUID, *, offset: int = 0, limit: int = 100
+        self, user_id: UUID, *, offset: int = 0, limit: int = DEFAULT_PAGE_LIMIT
     ) -> tuple[list[Workspace], int]:
         return await self._uow.workspaces.list_visible(
             user_id, offset=offset, limit=limit
@@ -134,7 +135,7 @@ class WorkspaceService:
         user_id: UUID,
         *,
         offset: int = 0,
-        limit: int = 100,
+        limit: int = DEFAULT_PAGE_LIMIT,
     ) -> tuple[list[WorkspaceMember], int]:
         await self._authorize(
             workspace_id, user_id, WorkspacePermission.MEMBER_READ

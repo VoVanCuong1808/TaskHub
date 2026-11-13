@@ -1,12 +1,12 @@
 """Workspace management HTTP endpoints."""
 
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Response, status
 
+from app.api.pagination import PaginationDep
 from app.core.deps import CurrentUserDep, WorkspaceServiceDep
-from app.schemas.common import Page, PaginationParams
+from app.schemas.common import Page
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceMemberCreate,
@@ -30,10 +30,10 @@ async def create_workspace(
 async def list_workspaces(
     service: WorkspaceServiceDep,
     user: CurrentUserDep,
-    pagination: Annotated[PaginationParams, Query()],
+    pagination: PaginationDep,
 ) -> Page[WorkspaceRead]:
     workspaces, total = await service.list(
-        user.id, offset=pagination.offset, limit=pagination.limit
+        user.id, offset=pagination.effective_offset, limit=pagination.limit
     )
     return Page[WorkspaceRead](
         items=[WorkspaceRead.model_validate(item) for item in workspaces],
@@ -75,12 +75,12 @@ async def list_workspace_members(
     workspace_id: UUID,
     service: WorkspaceServiceDep,
     user: CurrentUserDep,
-    pagination: Annotated[PaginationParams, Query()],
+    pagination: PaginationDep,
 ) -> Page[WorkspaceMemberRead]:
     members, total = await service.list_members(
         workspace_id,
         user.id,
-        offset=pagination.offset,
+        offset=pagination.effective_offset,
         limit=pagination.limit,
     )
     return Page[WorkspaceMemberRead](

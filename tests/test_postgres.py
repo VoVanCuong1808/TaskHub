@@ -24,6 +24,8 @@ from app.core.config import Settings
 from app.core.constants import AUTH_INACTIVE_ACCOUNT_MESSAGE
 from app.core.exceptions import (
     AuthenticationError,
+    InvalidAssigneeError,
+    PermissionDeniedError,
     ProjectArchivedError,
     TaskNotFoundError,
 )
@@ -36,6 +38,7 @@ from app.db.seed import (
     DEFAULT_WORKSPACE_ID,
     seed_default_data,
 )
+from app.db.task_uow import SQLAlchemyTaskManagementUnitOfWork
 from app.db.workspace_uow import SQLAlchemyWorkspaceUnitOfWork
 from app.main import create_app, integrity_error_response
 from app.models.entities import (
@@ -53,15 +56,14 @@ from app.models.entities import (
 )
 from app.models.enums import (
     ProjectStatus,
+    TaskPriority,
     TaskStatus,
     UserRole,
-    WorkspacePermission,
     WorkspaceRole,
 )
 from app.models.task import Task
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.task import TaskUpdate
 from app.services.auth_service import AuthService
 from app.services.task_service import TaskService
 from app.services.workspace_service import WorkspaceService
@@ -128,7 +130,7 @@ async def create_legacy_fixture(
         "INSERT INTO workspaces VALUES ('00000000-0000-4000-8000-000000000002','Old Workspace','00000000-0000-4000-8000-000000000001',now(),now())",
         "INSERT INTO projects VALUES ('00000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000002','Old Project','ACTIVE',now(),now())",
         "INSERT INTO labels VALUES ('00000000-0000-4000-8000-000000000004','00000000-0000-4000-8000-000000000002','Old Label',now())",
-        "INSERT INTO tasks VALUES ('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-000000000003','Old Task','description','TODO','LOW',NULL,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000001',now(),now())",
+        "INSERT INTO tasks VALUES ('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-000000000003','Old Task','description','TODO','URGENT','2020-05-06T07:08:09+00:00','00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000001',now(),now())",
         "INSERT INTO comments VALUES ('00000000-0000-4000-8000-000000000006','00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-000000000001','old comment',now())",
         "INSERT INTO task_labels VALUES ('00000000-0000-4000-8000-000000000005','00000000-0000-4000-8000-000000000004')",
     ]
@@ -331,6 +333,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_task_authentication_rejects_missing_invalid_expired_refresh_and_inactive(self) -> None:
         data = await self._make_task_auth_fixture()
+        missing_id = uuid4()
         requests = (
             ("/api/v1/tasks", "get", {"params": {"project_id": str(data.project.id)}}),
             ("/api/v1/tasks", "post", {"json": {"project_id": str(data.project.id), "title": "x"}}),
@@ -342,6 +345,19 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             (f"/tasks/{data.existing.id}", "get", {}),
             (f"/tasks/{data.existing.id}", "patch", {"json": {"title": "x"}}),
             (f"/tasks/{data.existing.id}", "delete", {}),
+            ("/api/v1/labels", "get", {"params": {"project_id": str(data.project.id)}}),
+            ("/api/v1/labels", "post", {"json": {"project_id": str(data.project.id), "name": "x", "color": "blue"}}),
+            (f"/api/v1/labels/{missing_id}", "get", {}),
+            (f"/api/v1/labels/{missing_id}", "patch", {"json": {"name": "x"}}),
+            (f"/api/v1/labels/{missing_id}", "delete", {}),
+            (f"/api/v1/tasks/{data.existing.id}/labels", "get", {}),
+            (f"/api/v1/tasks/{data.existing.id}/labels/{missing_id}", "put", {}),
+            (f"/api/v1/tasks/{data.existing.id}/labels/{missing_id}", "delete", {}),
+            (f"/api/v1/tasks/{data.existing.id}/comments", "get", {}),
+            (f"/api/v1/tasks/{data.existing.id}/comments", "post", {"json": {"content": "x"}}),
+            (f"/api/v1/comments/{missing_id}", "get", {}),
+            (f"/api/v1/comments/{missing_id}", "patch", {"json": {"content": "x"}}),
+            (f"/api/v1/comments/{missing_id}", "delete", {}),
         )
         invalid = "invalid"
         expired, _, _ = create_token(secret=data.secret, subject=data.owner.id, token_type="access", expires_in=timedelta(seconds=-1))
@@ -378,13 +394,28 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listing.status_code, 200)
             self.assertEqual([item["id"] for item in listing.json()["items"]], [str(data.existing.id)])
             self.assertEqual(listing.json()["total"], 1)
-            self.assertEqual(client.get("/api/v1/tasks", params={**project_query, "offset": 1}, headers=owner_headers).json(), {"items": [], "total": 1})
+            self.assertEqual(client.get("/api/v1/tasks", params={**project_query, "page": 2}, headers=owner_headers).json(), {"items": [], "total": 1})
             self.assertEqual(client.get("/api/v1/tasks", params={**project_query, "status": "done"}, headers=owner_headers).json(), {"items": [], "total": 0})
             self.assertEqual(client.get("/api/v1/tasks", params={"project_id": str(data.sibling.id)}, headers=owner_headers).json()["total"], 1)
 
-            created = client.post("/api/v1/tasks", headers=editor_headers, json={"project_id": str(data.project.id), "title": "Created"})
+            created = client.post(
+                "/api/v1/tasks",
+                headers=editor_headers,
+                json={
+                    "project_id": str(data.project.id),
+                    "title": "Created",
+                    "priority": "high",
+                    "due_date": "2026-11-13T10:00:00+07:00",
+                    "assignee_id": str(data.viewer.id),
+                },
+            )
             self.assertEqual(created.status_code, 201)
             self.assertEqual(created.json()["project_id"], str(data.project.id))
+            self.assertEqual(created.json()["priority"], "high")
+            self.assertEqual(created.json()["assignee_id"], str(data.viewer.id))
+            self.assertEqual(created.json()["created_by"], str(data.editor.id))
+            due_date = datetime.fromisoformat(created.json()["due_date"])
+            self.assertEqual(due_date, datetime(2026, 11, 13, 3, tzinfo=UTC))
             self.assertEqual(client.get("/api/v1/tasks", params=project_query, headers=editor_headers).status_code, 200)
             self.assertEqual(client.get(f"/api/v1/tasks/{created.json()['id']}", headers=editor_headers).status_code, 200)
             self.assertEqual(client.patch(f"/api/v1/tasks/{created.json()['id']}", headers=editor_headers, json={"description": "updated"}).status_code, 200)
@@ -392,6 +423,15 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cleared.status_code, 200)
             self.assertEqual(cleared.json()["title"], "Created")
             self.assertIsNone(cleared.json()["description"])
+            advanced_cleared = client.patch(
+                f"/api/v1/tasks/{created.json()['id']}",
+                headers=editor_headers,
+                json={"priority": "urgent", "due_date": None, "assignee_id": None},
+            )
+            self.assertEqual(advanced_cleared.status_code, 200)
+            self.assertEqual(advanced_cleared.json()["priority"], "urgent")
+            self.assertIsNone(advanced_cleared.json()["due_date"])
+            self.assertIsNone(advanced_cleared.json()["assignee_id"])
             editor_deletable = client.post("/api/v1/tasks", headers=editor_headers, json={"project_id": str(data.project.id), "title": "Editor deletes"})
             self.assertEqual(editor_deletable.status_code, 201)
             self.assertEqual(client.delete(f"/api/v1/tasks/{editor_deletable.json()['id']}", headers=editor_headers).status_code, 204)
@@ -405,6 +445,749 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         async with self.session_factory() as session:
             stored = await session.get(TaskRow, UUID(created.json()["id"]))
             self.assertEqual(stored.created_by, data.editor.id)
+
+    async def test_task_list_filters_and_one_based_pagination(self) -> None:
+        data = await self._make_task_auth_fixture()
+        owner_headers = self._task_auth_headers(data.owner, data.secret)
+        created_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+        async with self.session_factory() as session:
+            existing = await session.get(TaskRow, data.existing.id)
+            existing.status = TaskStatus.TODO
+            existing.priority = TaskPriority.HIGH
+            existing.assignee_id = data.viewer.id
+            existing.created_at = created_at
+            existing.updated_at = created_at
+            second = TaskRow(
+                project_id=data.project.id,
+                title="Second matching task",
+                status=TaskStatus.TODO,
+                priority=TaskPriority.HIGH,
+                assignee_id=data.viewer.id,
+                created_by=data.owner.id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            done = TaskRow(
+                project_id=data.project.id,
+                title="Done urgent task",
+                status=TaskStatus.DONE,
+                priority=TaskPriority.URGENT,
+                assignee_id=data.editor.id,
+                created_by=data.owner.id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            unassigned = TaskRow(
+                project_id=data.project.id,
+                title="Unassigned low task",
+                status=TaskStatus.TODO,
+                priority=TaskPriority.LOW,
+                assignee_id=None,
+                created_by=data.owner.id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            session.add_all([second, done, unassigned])
+            await session.commit()
+
+        project_query = {"project_id": str(data.project.id)}
+        with TestClient(create_app(self._task_auth_settings())) as client:
+            def listing(**params):
+                return client.get(
+                    "/api/v1/tasks",
+                    params={**project_query, **params},
+                    headers=owner_headers,
+                )
+
+            status_page = listing(status="todo")
+            priority_page = listing(priority="high")
+            assignee_page = listing(assignee_id=str(data.viewer.id))
+            combined = listing(
+                status="todo", priority="high", assignee_id=str(data.viewer.id)
+            )
+            combined_limited = listing(
+                status="todo",
+                priority="high",
+                assignee_id=str(data.viewer.id),
+                limit=1,
+            )
+            self.assertEqual(status_page.json()["total"], 3)
+            self.assertEqual(priority_page.json()["total"], 2)
+            self.assertEqual(assignee_page.json()["total"], 2)
+            self.assertEqual(combined.json()["total"], 2)
+            self.assertEqual(combined_limited.json()["total"], 2)
+            self.assertEqual(len(combined_limited.json()["items"]), 1)
+            matching_ids = sorted([str(data.existing.id), str(second.id)], reverse=True)
+            self.assertEqual(
+                [item["id"] for item in combined.json()["items"]], matching_ids
+            )
+
+            first_page = listing(page=1, limit=2)
+            second_page = listing(page=2, limit=2)
+            empty_page = listing(page=3, limit=2)
+            self.assertEqual(first_page.json()["total"], 4)
+            self.assertEqual(second_page.json()["total"], 4)
+            self.assertEqual(empty_page.json(), {"items": [], "total": 4})
+            all_ids = sorted(
+                [
+                    str(data.existing.id),
+                    str(second.id),
+                    str(done.id),
+                    str(unassigned.id),
+                ],
+                reverse=True,
+            )
+            self.assertEqual(
+                [item["id"] for item in first_page.json()["items"]], all_ids[:2]
+            )
+            self.assertEqual(
+                [item["id"] for item in second_page.json()["items"]], all_ids[2:]
+            )
+            self.assertEqual(
+                client.get(
+                    "/tasks",
+                    params={**project_query, "page": 1, "limit": 2},
+                    headers=owner_headers,
+                ).json(),
+                first_page.json(),
+            )
+            self.assertEqual(listing(page=2, limit=2).json(), second_page.json())
+
+            for invalid_params in (
+                {"page": 0},
+                {"page": 2, "offset": 0},
+                {"page": 9_223_372_036_854_775_808},
+                {"offset": 9_223_372_036_854_775_808},
+                {"priority": "critical"},
+                {"assignee_id": "not-a-uuid"},
+            ):
+                self.assertEqual(listing(**invalid_params).status_code, 422)
+
+            unknown_assignee = listing(assignee_id=str(uuid4()))
+            foreign_assignee = listing(assignee_id=str(data.outsider.id))
+            self.assertEqual(unknown_assignee.json(), {"items": [], "total": 0})
+            self.assertEqual(foreign_assignee.json(), {"items": [], "total": 0})
+            sibling = client.get(
+                "/api/v1/tasks",
+                params={"project_id": str(data.sibling.id)},
+                headers=owner_headers,
+            )
+            self.assertEqual(sibling.json()["total"], 1)
+            hidden_project = client.get(
+                "/api/v1/tasks",
+                params={"project_id": str(data.other_project.id)},
+                headers=owner_headers,
+            )
+            self.assertEqual(hidden_project.status_code, 404)
+            viewer = client.get(
+                "/api/v1/tasks",
+                params=project_query,
+                headers=self._task_auth_headers(data.viewer, data.secret),
+            )
+            self.assertEqual(viewer.status_code, 200)
+
+    async def test_day5_assignment_labels_and_comments_api_contract(self) -> None:
+        data = await self._make_task_auth_fixture()
+        inactive = User(
+            id=uuid4(),
+            email=f"inactive-{uuid4().hex}@example.test",
+            full_name="Inactive member",
+            hashed_password="unused",
+            is_active=False,
+        )
+        async with self.session_factory() as session:
+            session.add(inactive)
+            session.add(
+                WorkspaceMember(
+                    workspace_id=data.project.workspace_id,
+                    user_id=inactive.id,
+                    role=WorkspaceRole.VIEWER,
+                )
+            )
+            await session.commit()
+        owner_headers = self._task_auth_headers(data.owner, data.secret)
+        editor_headers = self._task_auth_headers(data.editor, data.secret)
+        viewer_headers = self._task_auth_headers(data.viewer, data.secret)
+        admin_headers = self._task_auth_headers(data.admin, data.secret)
+
+        with TestClient(create_app(self._task_auth_settings())) as client:
+            assigned_to_legacy_owner = client.post(
+                "/api/v1/tasks",
+                headers=editor_headers,
+                json={
+                    "project_id": str(data.project.id),
+                    "title": "Legacy owner assignment",
+                    "assignee_id": str(data.owner.id),
+                },
+            )
+            self.assertEqual(assigned_to_legacy_owner.status_code, 201)
+            for assignee in (data.outsider, data.admin, inactive):
+                rejected = client.post(
+                    "/api/v1/tasks",
+                    headers=owner_headers,
+                    json={
+                        "project_id": str(data.project.id),
+                        "title": "Invalid assignment",
+                        "assignee_id": str(assignee.id),
+                    },
+                )
+                self.assertEqual(rejected.status_code, 422)
+                self.assertEqual(
+                    rejected.json(),
+                    {"detail": "Assignee must be an active workspace member"},
+                )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/tasks",
+                    headers=owner_headers,
+                    json={
+                        "project_id": str(data.project.id),
+                        "title": "Naive due date",
+                        "due_date": "2026-11-13T10:00:00",
+                    },
+                ).status_code,
+                422,
+            )
+
+            label = client.post(
+                "/api/v1/labels",
+                headers=editor_headers,
+                json={
+                    "project_id": str(data.project.id),
+                    "name": "Backend",
+                    "color": "blue",
+                },
+            )
+            self.assertEqual(label.status_code, 201)
+            label_id = label.json()["id"]
+            label_page = client.get(
+                "/api/v1/labels",
+                headers=viewer_headers,
+                params={"project_id": str(data.project.id), "page": 2, "limit": 1},
+            )
+            self.assertEqual(label_page.json(), {"items": [], "total": 1})
+            self.assertEqual(
+                client.patch(
+                    f"/api/v1/labels/{label_id}",
+                    headers=viewer_headers,
+                    json={"name": "Denied"},
+                ).status_code,
+                403,
+            )
+            self.assertEqual(
+                client.get(
+                    f"/api/v1/labels/{label_id}", headers=admin_headers
+                ).status_code,
+                404,
+            )
+            task_id = data.existing.id
+            link_path = f"/api/v1/tasks/{task_id}/labels/{label_id}"
+            self.assertEqual(client.put(link_path, headers=editor_headers).status_code, 204)
+            self.assertEqual(client.put(link_path, headers=editor_headers).status_code, 204)
+            linked = client.get(
+                f"/api/v1/tasks/{task_id}/labels", headers=viewer_headers
+            )
+            self.assertEqual(linked.status_code, 200)
+            self.assertEqual(linked.json()["total"], 1)
+
+            sibling_label = client.post(
+                "/api/v1/labels",
+                headers=owner_headers,
+                json={
+                    "project_id": str(data.sibling.id),
+                    "name": "Sibling",
+                    "color": "orange",
+                },
+            )
+            cross_project = client.put(
+                f"/api/v1/tasks/{task_id}/labels/{sibling_label.json()['id']}",
+                headers=owner_headers,
+            )
+            self.assertEqual(cross_project.status_code, 422)
+            self.assertEqual(
+                cross_project.json(),
+                {"detail": "Label must belong to the task project"},
+            )
+            self.assertEqual(client.delete(link_path, headers=editor_headers).status_code, 204)
+            self.assertEqual(client.delete(link_path, headers=editor_headers).status_code, 404)
+            self.assertEqual(client.put(link_path, headers=editor_headers).status_code, 204)
+            self.assertEqual(
+                client.delete(
+                    f"/api/v1/labels/{label_id}", headers=editor_headers
+                ).status_code,
+                204,
+            )
+
+            comment = client.post(
+                f"/api/v1/tasks/{task_id}/comments",
+                headers=editor_headers,
+                json={"content": "First comment"},
+            )
+            self.assertEqual(comment.status_code, 201)
+            self.assertEqual(comment.json()["author_id"], str(data.editor.id))
+            comment_id = comment.json()["id"]
+            comments = client.get(
+                f"/api/v1/tasks/{task_id}/comments",
+                headers=viewer_headers,
+                params={"page": 2, "limit": 1},
+            )
+            self.assertEqual(comments.json(), {"items": [], "total": 1})
+            self.assertEqual(
+                client.post(
+                    f"/api/v1/tasks/{task_id}/comments",
+                    headers=viewer_headers,
+                    json={"content": "Denied"},
+                ).status_code,
+                403,
+            )
+            not_author = client.patch(
+                f"/api/v1/comments/{comment_id}",
+                headers=owner_headers,
+                json={"content": "Owner edit"},
+            )
+            self.assertEqual(not_author.status_code, 403)
+            self.assertEqual(
+                not_author.json(),
+                {"detail": "Comment can only be changed by its author"},
+            )
+            self.assertEqual(
+                client.patch(
+                    f"/api/v1/comments/{comment_id}",
+                    headers=editor_headers,
+                    json={"content": "Author edit"},
+                ).json()["content"],
+                "Author edit",
+            )
+            self.assertEqual(
+                client.get(
+                    f"/api/v1/comments/{comment_id}", headers=admin_headers
+                ).status_code,
+                404,
+            )
+            self.assertEqual(
+                client.delete(
+                    f"/api/v1/comments/{comment_id}", headers=editor_headers
+                ).status_code,
+                204,
+            )
+            self.assertEqual(client.get("/labels", headers=owner_headers).status_code, 404)
+            self.assertEqual(
+                client.get(
+                    f"/tasks/{task_id}/comments", headers=owner_headers
+                ).status_code,
+                404,
+            )
+
+            for response in (
+                client.post(
+                    "/api/v1/labels",
+                    headers=owner_headers,
+                    json={
+                        "project_id": str(data.archived.id),
+                        "name": "Archived",
+                        "color": "gray",
+                    },
+                ),
+                client.post(
+                    f"/api/v1/tasks/{data.archived_task.id}/comments",
+                    headers=owner_headers,
+                    json={"content": "Archived"},
+                ),
+            ):
+                self.assertEqual(response.status_code, 409)
+
+        async with self.session_factory() as session:
+            remaining_links = await session.scalar(
+                select(func.count())
+                .select_from(TaskLabel)
+                .where(TaskLabel.label_id == UUID(label_id))
+            )
+        self.assertEqual(remaining_links, 0)
+
+    async def test_concurrent_duplicate_label_attach_is_idempotent(self) -> None:
+        data = await self._make_task_auth_fixture()
+        async with self.session_factory() as session:
+            label = Label(
+                project_id=data.project.id, name="Concurrent", color="blue"
+            )
+            session.add(label)
+            await session.commit()
+            label_id = label.id
+
+        async def attach() -> None:
+            async with self.session_factory() as session:
+                await TaskService(
+                    SQLAlchemyTaskManagementUnitOfWork(session)
+                ).attach_label(data.existing.id, label_id, data.editor.id)
+
+        await asyncio.wait_for(
+            asyncio.gather(attach(), attach()), timeout=5
+        )
+        async with self.session_factory() as session:
+            links = await session.scalar(
+                select(func.count())
+                .select_from(TaskLabel)
+                .where(
+                    TaskLabel.task_id == data.existing.id,
+                    TaskLabel.label_id == label_id,
+                )
+            )
+        self.assertEqual(links, 1)
+
+    async def test_assignee_membership_removal_serializes_with_assignment(self) -> None:
+        data = await self._make_task_auth_fixture()
+        async with self.session_factory() as session:
+            existing = await session.get(TaskRow, data.existing.id)
+            existing.assignee_id = data.owner.id
+            await session.commit()
+        workspace_locked = asyncio.Event()
+        remove_now = asyncio.Event()
+        writer_pid_ready = asyncio.Event()
+        writer_pid: int | None = None
+
+        async def remove_assignee() -> None:
+            async with self.session_factory() as session:
+                await session.scalar(
+                    select(Workspace)
+                    .where(Workspace.id == data.project.workspace_id)
+                    .with_for_update()
+                )
+                member = await session.get(
+                    WorkspaceMember,
+                    (data.project.workspace_id, data.viewer.id),
+                )
+                workspace_locked.set()
+                await remove_now.wait()
+                await session.delete(member)
+                await session.commit()
+
+        async def assign_removed_user() -> bool:
+            nonlocal writer_pid
+            async with self.session_factory() as session:
+                writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                writer_pid_ready.set()
+                try:
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).update(
+                        data.existing.id,
+                        {"assignee_id": data.viewer.id},
+                        data.owner.id,
+                    )
+                except InvalidAssigneeError:
+                    return True
+                return False
+
+        remover = asyncio.create_task(remove_assignee())
+        await workspace_locked.wait()
+        writer = asyncio.create_task(assign_removed_user())
+        await writer_pid_ready.wait()
+        self.assertIsNotNone(writer_pid)
+        await wait_for_database_lock(self.session_factory, writer_pid)
+        remove_now.set()
+        self.assertTrue(await asyncio.wait_for(writer, timeout=5))
+        await asyncio.wait_for(remover, timeout=5)
+        async with self.session_factory() as session:
+            saved = await session.get(TaskRow, data.existing.id)
+            member = await session.get(
+                WorkspaceMember, (data.project.workspace_id, data.viewer.id)
+            )
+        self.assertIsNone(member)
+        self.assertNotEqual(saved.assignee_id, data.viewer.id)
+
+    async def test_reciprocal_assignee_task_creates_do_not_deadlock(self) -> None:
+        data = await self._make_task_auth_fixture()
+        second_workspace = Workspace(
+            id=uuid4(), name="Reciprocal workspace", owner_id=data.editor.id
+        )
+        second_project = Project(
+            id=uuid4(), workspace=second_workspace, name="Reciprocal"
+        )
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    second_workspace,
+                    WorkspaceMember(
+                        workspace_id=second_workspace.id,
+                        user_id=data.owner.id,
+                        role=WorkspaceRole.EDITOR,
+                    ),
+                    second_project,
+                ]
+            )
+            await session.commit()
+
+        assignee_lock_barrier = asyncio.Barrier(2)
+
+        class BarrierUserStore:
+            def __init__(self, repository) -> None:
+                self.repository = repository
+
+            async def get_for_share(self, user_id: UUID):
+                user = await self.repository.get_for_share(user_id)
+                await assignee_lock_barrier.wait()
+                return user
+
+        async def create_task(
+            actor: User, project_id: UUID, assignee_id: UUID, title: str
+        ) -> UUID:
+            async with self.session_factory() as session:
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                uow.users = BarrierUserStore(uow.users)
+                created = await TaskService(uow).create(
+                    project_id=project_id,
+                    user_id=actor.id,
+                    title=title,
+                    assignee_id=assignee_id,
+                )
+                return created.id
+
+        task_ids = await asyncio.wait_for(
+            asyncio.gather(
+                create_task(
+                    data.owner,
+                    data.project.id,
+                    data.editor.id,
+                    "A assigns B",
+                ),
+                create_task(
+                    data.editor,
+                    second_project.id,
+                    data.owner.id,
+                    "B assigns A",
+                ),
+            ),
+            timeout=10,
+        )
+        async with self.session_factory() as session:
+            saved = list(
+                await session.scalars(
+                    select(TaskRow).where(TaskRow.id.in_(task_ids))
+                )
+            )
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(
+            {task.assignee_id for task in saved}, {data.owner.id, data.editor.id}
+        )
+
+    async def test_assignee_share_lock_blocks_deactivation_until_create_commits(
+        self,
+    ) -> None:
+        data = await self._make_task_auth_fixture()
+        user_locked = asyncio.Event()
+        continue_create = asyncio.Event()
+        update_pid_ready = asyncio.Event()
+        update_pid: int | None = None
+
+        class PausingUserStore:
+            def __init__(self, repository) -> None:
+                self.repository = repository
+
+            async def get_for_share(self, user_id: UUID):
+                user = await self.repository.get_for_share(user_id)
+                user_locked.set()
+                await continue_create.wait()
+                return user
+
+        async def create_assigned_task() -> UUID:
+            async with self.session_factory() as session:
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                uow.users = PausingUserStore(uow.users)
+                task = await TaskService(uow).create(
+                    project_id=data.project.id,
+                    user_id=data.owner.id,
+                    title="Active assignee stays valid through create",
+                    assignee_id=data.viewer.id,
+                )
+                return task.id
+
+        async def deactivate_assignee() -> None:
+            nonlocal update_pid
+            async with self.session_factory() as session:
+                update_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                update_pid_ready.set()
+                user = await session.get(User, data.viewer.id)
+                user.is_active = False
+                await session.commit()
+
+        create = asyncio.create_task(create_assigned_task())
+        await user_locked.wait()
+        deactivate = asyncio.create_task(deactivate_assignee())
+        await update_pid_ready.wait()
+        self.assertIsNotNone(update_pid)
+        try:
+            await wait_for_database_lock(self.session_factory, update_pid)
+        finally:
+            continue_create.set()
+        task_id = await asyncio.wait_for(create, timeout=5)
+        await asyncio.wait_for(deactivate, timeout=5)
+
+        async with self.session_factory() as session:
+            saved = await session.get(TaskRow, task_id)
+            assignee = await session.get(User, data.viewer.id)
+        self.assertEqual(saved.assignee_id, data.viewer.id)
+        self.assertFalse(assignee.is_active)
+
+    async def test_task_service_partial_updates_serialize_and_reload(self) -> None:
+        data = await self._make_task_auth_fixture()
+        first_locked = asyncio.Event()
+        release_first = asyncio.Event()
+        second_pid_ready = asyncio.Event()
+        second_pid: int | None = None
+
+        async def update_description() -> None:
+            async with self.session_factory() as session:
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                save = uow.tasks.save
+
+                async def hold_save(task: Task) -> Task | None:
+                    first_locked.set()
+                    await release_first.wait()
+                    return await save(task)
+
+                uow.tasks.save = hold_save
+                await TaskService(uow).update(
+                    data.existing.id,
+                    {"description": "description retained"},
+                    data.owner.id,
+                )
+
+        async def update_status() -> None:
+            nonlocal second_pid
+            await first_locked.wait()
+            async with self.session_factory() as session:
+                second_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                second_pid_ready.set()
+                await TaskService(
+                    SQLAlchemyTaskManagementUnitOfWork(session)
+                ).update(
+                    data.existing.id,
+                    {"status": TaskStatus.IN_PROGRESS},
+                    data.owner.id,
+                )
+
+        first = asyncio.create_task(update_description())
+        second = asyncio.create_task(update_status())
+        await second_pid_ready.wait()
+        self.assertIsNotNone(second_pid)
+        await wait_for_database_lock(self.session_factory, second_pid)
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+        async with self.session_factory() as session:
+            saved = await session.get(TaskRow, data.existing.id)
+        self.assertEqual(saved.description, "description retained")
+        self.assertEqual(saved.status, TaskStatus.IN_PROGRESS)
+
+    async def test_label_write_serializes_with_member_role_downgrade(self) -> None:
+        data = await self._make_task_auth_fixture()
+        async with self.session_factory() as session:
+            label = Label(
+                project_id=data.project.id, name="Role race", color="blue"
+            )
+            session.add(label)
+            await session.commit()
+            label_id = label.id
+
+        membership_locked = asyncio.Event()
+        downgrade_now = asyncio.Event()
+        writer_pid_ready = asyncio.Event()
+        writer_pid: int | None = None
+
+        async def downgrade_editor() -> None:
+            async with self.session_factory() as session:
+                await session.scalar(
+                    select(Workspace)
+                    .where(Workspace.id == data.project.workspace_id)
+                    .with_for_update()
+                )
+                member = await session.scalar(
+                    select(WorkspaceMember)
+                    .where(
+                        WorkspaceMember.workspace_id == data.project.workspace_id,
+                        WorkspaceMember.user_id == data.editor.id,
+                    )
+                    .with_for_update()
+                )
+                membership_locked.set()
+                await downgrade_now.wait()
+                member.role = WorkspaceRole.VIEWER
+                await session.commit()
+
+        async def attempt_attach() -> bool:
+            nonlocal writer_pid
+            async with self.session_factory() as session:
+                writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                writer_pid_ready.set()
+                try:
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).attach_label(data.existing.id, label_id, data.editor.id)
+                except PermissionDeniedError:
+                    return True
+                return False
+
+        downgrader = asyncio.create_task(downgrade_editor())
+        await membership_locked.wait()
+        writer = asyncio.create_task(attempt_attach())
+        await writer_pid_ready.wait()
+        self.assertIsNotNone(writer_pid)
+        await wait_for_database_lock(self.session_factory, writer_pid)
+        downgrade_now.set()
+        self.assertTrue(await asyncio.wait_for(writer, timeout=5))
+        await asyncio.wait_for(downgrader, timeout=5)
+        async with self.session_factory() as session:
+            link = await session.get(TaskLabel, (data.existing.id, label_id))
+        self.assertIsNone(link)
+
+    async def test_comment_write_serializes_with_ownership_transfer(self) -> None:
+        data = await self._make_task_auth_fixture()
+        workspace_locked = asyncio.Event()
+        transfer_now = asyncio.Event()
+        writer_pid_ready = asyncio.Event()
+        writer_pid: int | None = None
+
+        async def transfer_workspace() -> None:
+            async with self.session_factory() as session:
+                workspace = await session.scalar(
+                    select(Workspace)
+                    .where(Workspace.id == data.project.workspace_id)
+                    .with_for_update()
+                )
+                workspace_locked.set()
+                await transfer_now.wait()
+                workspace.owner_id = data.outsider.id
+                await session.commit()
+
+        async def attempt_comment() -> bool:
+            nonlocal writer_pid
+            async with self.session_factory() as session:
+                writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+                writer_pid_ready.set()
+                try:
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).create_comment(data.existing.id, data.owner.id, "racing write")
+                except TaskNotFoundError:
+                    return True
+                return False
+
+        transfer = asyncio.create_task(transfer_workspace())
+        await workspace_locked.wait()
+        writer = asyncio.create_task(attempt_comment())
+        await writer_pid_ready.wait()
+        self.assertIsNotNone(writer_pid)
+        await wait_for_database_lock(self.session_factory, writer_pid)
+        transfer_now.set()
+        self.assertTrue(await asyncio.wait_for(writer, timeout=5))
+        await asyncio.wait_for(transfer, timeout=5)
+        async with self.session_factory() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(Comment)
+                .where(Comment.content == "racing write")
+            )
+        self.assertEqual(count, 0)
 
     async def test_viewer_403_and_archived_409_precedence(self) -> None:
         data = await self._make_task_auth_fixture()
@@ -608,7 +1391,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listed.json()["total"], 2)
             workspace_page = client.get(
                 "/api/v1/workspaces",
-                params={"offset": 1, "limit": 1},
+                params={"page": 2, "limit": 1},
                 headers=headers,
             ).json()
             self.assertEqual(len(workspace_page["items"]), 1)
@@ -635,7 +1418,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(members.json()["total"], 3)
             member_page = client.get(
                 member_path,
-                params={"offset": 1, "limit": 1},
+                params={"page": 2, "limit": 1},
                 headers=headers,
             ).json()
             self.assertEqual(len(member_page["items"]), 1)
@@ -863,13 +1646,20 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
 
         async def hold_task_write() -> None:
             async with self.session_factory() as session:
-                task = await TaskRepository(session)._authorize_task(
-                    data.task.id, data.editor.id, WorkspacePermission.TASK_UPDATE
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                save = uow.tasks.save
+
+                async def save_after_signal(task: Task) -> Task:
+                    task_authorized.set()
+                    await release_task.wait()
+                    return await save(task)
+
+                uow.tasks.save = save_after_signal
+                await TaskService(uow).update(
+                    data.task.id,
+                    {"title": "write completed before revocation"},
+                    data.editor.id,
                 )
-                task_authorized.set()
-                await release_task.wait()
-                task.title = "write completed before revocation"
-                await session.commit()
 
         async def revoke_editor() -> None:
             nonlocal remover_pid
@@ -1451,9 +2241,12 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual, expected)
 
     async def test_legacy_conversion_preserves_data_for_both_revisions(self) -> None:
+        legacy_engine = create_async_engine(
+            self.test_url, connect_args={"statement_cache_size": 0}
+        )
         for revision in ("552a3882346e", "9e5ac2ec2ba3"):
             schema = f"legacy_{uuid4().hex}"
-            connection = await self.engine.connect()
+            connection = await legacy_engine.connect()
             transaction = await connection.begin()
             try:
                 await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -1466,7 +2259,8 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 values = await connection.execute(
                     text(
                         "SELECT u.hashed_password, p.description, l.project_id, l.color, "
-                        "t.created_by, c.content, c.updated_at, tl.created_at "
+                        "t.created_by, t.priority, t.due_date, t.assignee_id, "
+                        "c.content, c.updated_at, tl.created_at "
                         "FROM users u CROSS JOIN projects p CROSS JOIN labels l "
                         "CROSS JOIN tasks t CROSS JOIN comments c CROSS JOIN task_labels tl"
                     )
@@ -1479,6 +2273,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(row.description, None)
                 self.assertEqual(row.color, "#777777")
                 self.assertEqual(row.content, "old comment")
+                self.assertEqual(row.priority, "URGENT")
+                self.assertEqual(
+                    row.due_date, datetime(2020, 5, 6, 7, 8, 9, tzinfo=UTC)
+                )
+                self.assertEqual(row.assignee_id, UUID("00000000-0000-4000-8000-000000000001"))
                 self.assertIsNotNone(row.project_id)
                 self.assertIsNotNone(row.created_by)
                 self.assertIsNotNone(row.updated_at)
@@ -1492,6 +2291,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await transaction.rollback()
                 await connection.close()
+        await legacy_engine.dispose()
 
     async def test_legacy_conversion_preserves_existing_full_timestamps(self) -> None:
         schema = f"legacy_{uuid4().hex}"
@@ -1591,14 +2391,16 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             repository = TaskRepository(session)
             for title in ("first", "second", "third"):
                 await repository.add(
-                    Task(title=title, status=TaskStatus.IN_PROGRESS),
-                    project_id=DEFAULT_PROJECT_ID,
-                    user_id=DEFAULT_USER_ID,
+                    Task(
+                        title=title,
+                        status=TaskStatus.IN_PROGRESS,
+                        project_id=DEFAULT_PROJECT_ID,
+                        created_by=DEFAULT_USER_ID,
+                    )
                 )
-            await repository.commit()
+            await session.commit()
             items, total = await repository.list(
                 project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
                 status=TaskStatus.IN_PROGRESS,
                 offset=1,
                 limit=1,
@@ -1611,45 +2413,46 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         async with self.session_factory() as session:
             repository = TaskRepository(session)
             created = await repository.add(
-                Task(title="nullable fields"),
-                project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="nullable fields",
+                    project_id=DEFAULT_PROJECT_ID,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
-            await repository.commit()
+            await session.commit()
             stored = await session.get(TaskRow, created.id)
             self.assertIsNone(stored.description)
             self.assertIsNone(stored.assignee_id)
             self.assertIsNone(stored.due_date)
-            found = await repository.get_for_update(
-                created.id, user_id=DEFAULT_USER_ID
-            )
+            found = await repository.get_for_update(created.id)
             self.assertEqual(found.title, "nullable fields")
             found.title = "updated title"
             found.description = None
             found.touch()
             saved = await repository.save(found)
-            await repository.commit()
+            await session.commit()
             self.assertEqual(saved.title, "updated title")
-            await repository.delete(created.id, user_id=DEFAULT_USER_ID)
-            await repository.commit()
-            with self.assertRaises(TaskNotFoundError):
-                await repository.get(created.id, user_id=DEFAULT_USER_ID)
+            await repository.delete(created.id)
+            await session.commit()
+            self.assertIsNone(await repository.get(created.id))
 
-    async def test_save_missing_task_raises_not_found(self) -> None:
+    async def test_save_missing_task_keeps_repository_free_of_domain_errors(self) -> None:
         async with self.session_factory() as session:
             repository = TaskRepository(session)
-            with self.assertRaises(TaskNotFoundError):
-                await repository.save(Task(id=uuid4(), title="missing"))
+            missing = Task(id=uuid4(), title="missing")
+            self.assertIsNone(await repository.save(missing))
 
     async def test_concurrent_updates_preserve_both_fields(self) -> None:
         async with self.session_factory() as session:
             repository = TaskRepository(session)
             task = await repository.add(
-                Task(title="concurrent"),
-                project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="concurrent",
+                    project_id=DEFAULT_PROJECT_ID,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
-            await repository.commit()
+            await session.commit()
 
         first_locked = asyncio.Event()
         release_first = asyncio.Event()
@@ -1657,27 +2460,23 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         async def update_description() -> None:
             async with self.session_factory() as session:
                 repository = TaskRepository(session)
-                current = await repository.get_for_update(
-                    task.id, user_id=DEFAULT_USER_ID
-                )
+                current = await repository.get_for_update(task.id)
                 first_locked.set()
                 await release_first.wait()
                 current.description = "description retained"
                 current.touch()
                 await repository.save(current)
-                await repository.commit()
+                await session.commit()
 
         async def update_status() -> None:
             await first_locked.wait()
             async with self.session_factory() as session:
                 repository = TaskRepository(session)
-                current = await repository.get_for_update(
-                    task.id, user_id=DEFAULT_USER_ID
-                )
+                current = await repository.get_for_update(task.id)
                 current.status = TaskStatus.IN_PROGRESS
                 current.touch()
                 await repository.save(current)
-                await repository.commit()
+                await session.commit()
 
         first = asyncio.create_task(update_description())
         second = asyncio.create_task(update_status())
@@ -1687,9 +2486,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
 
         async with self.session_factory() as session:
-            current = await TaskRepository(session).get(
-                task.id, user_id=DEFAULT_USER_ID
-            )
+            current = await TaskRepository(session).get(task.id)
 
         self.assertEqual(current.description, "description retained")
         self.assertEqual(current.status, TaskStatus.IN_PROGRESS)
@@ -1702,9 +2499,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             session.add(project)
             await session.flush()
             task = await TaskRepository(session).add(
-                Task(title="archive lock"),
-                project_id=project.id,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="archive lock",
+                    project_id=project.id,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
             await session.commit()
 
@@ -1731,8 +2530,10 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 writer_pid_ready.set()
                 try:
-                    await TaskService(TaskRepository(session)).update(
-                        task.id, TaskUpdate(title="must not commit"), DEFAULT_USER_ID
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).update(
+                        task.id, {"title": "must not commit"}, DEFAULT_USER_ID
                     )
                 except ProjectArchivedError:
                     return True
@@ -1773,9 +2574,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             session.add(membership)
             task = await TaskRepository(session).add(
-                Task(title="membership lock"),
-                project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="membership lock",
+                    project_id=DEFAULT_PROJECT_ID,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
             await session.commit()
 
@@ -1805,8 +2608,10 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 writer_pid_ready.set()
                 try:
-                    await TaskService(TaskRepository(session)).update(
-                        task.id, TaskUpdate(title="must roll back"), user_id
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).update(
+                        task.id, {"title": "must roll back"}, user_id
                     )
                 except TaskNotFoundError:
                     return True
@@ -1872,8 +2677,10 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 writer_pid_ready.set()
                 try:
-                    await TaskService(TaskRepository(session)).update(
-                        task.id, TaskUpdate(title="must roll back"), old_owner.id
+                    await TaskService(
+                        SQLAlchemyTaskManagementUnitOfWork(session)
+                    ).update(
+                        task.id, {"title": "must roll back"}, old_owner.id
                     )
                 except TaskNotFoundError:
                     return True
@@ -1896,9 +2703,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         async with self.session_factory() as session:
             repository = TaskRepository(session)
             task = await repository.add(
-                Task(title="cascade"),
-                project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="cascade",
+                    project_id=DEFAULT_PROJECT_ID,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
             label = Label(project_id=DEFAULT_PROJECT_ID, name="test", color="#777777")
             session.add(label)
@@ -1913,9 +2722,9 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ]
             )
-            await repository.commit()
-            await repository.delete(task.id, user_id=DEFAULT_USER_ID)
-            await repository.commit()
+            await session.commit()
+            await repository.delete(task.id)
+            await session.commit()
             comments = await session.scalar(
                 select(func.count())
                 .select_from(Comment)
@@ -1934,9 +2743,11 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         async with self.session_factory() as session:
             repository = TaskRepository(session)
             domain_task = await repository.add(
-                Task(title="timestamps"),
-                project_id=DEFAULT_PROJECT_ID,
-                user_id=DEFAULT_USER_ID,
+                Task(
+                    title="timestamps",
+                    project_id=DEFAULT_PROJECT_ID,
+                    created_by=DEFAULT_USER_ID,
+                )
             )
             label = Label(
                 project_id=DEFAULT_PROJECT_ID, name="timestamps", color="#777777"
