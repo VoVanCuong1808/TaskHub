@@ -10,9 +10,15 @@ from uuid import UUID
 
 from app.core.constants import (
     AUTH_NOT_AUTHENTICATED_MESSAGE,
+    COMMENT_AUTHOR_MESSAGE,
+    COMMENT_NOT_FOUND_MESSAGE,
     INSUFFICIENT_WORKSPACE_ROLE_MESSAGE,
+    INVALID_ASSIGNEE_MESSAGE,
+    LABEL_NOT_FOUND_MESSAGE,
+    LABEL_PROJECT_MISMATCH_MESSAGE,
     PROJECT_ARCHIVED_MESSAGE,
     PROJECT_NOT_FOUND_MESSAGE,
+    TASK_LABEL_NOT_FOUND_MESSAGE,
     TASK_NOT_FOUND_MESSAGE,
     WORKSPACE_MEMBER_NOT_FOUND_MESSAGE,
     WORKSPACE_NOT_FOUND_MESSAGE,
@@ -73,6 +79,50 @@ class ProjectArchivedError(ApplicationError):
 
     def __init__(self) -> None:
         super().__init__(PROJECT_ARCHIVED_MESSAGE)
+
+
+class InvalidAssigneeError(ApplicationError):
+    """A requested task assignee is not active and visible in the workspace."""
+
+    status_code = HTTPStatus.UNPROCESSABLE_ENTITY
+
+    def __init__(self) -> None:
+        super().__init__(INVALID_ASSIGNEE_MESSAGE)
+
+
+class LabelNotFoundError(ApplicationError):
+    status_code = HTTPStatus.NOT_FOUND
+
+    def __init__(self) -> None:
+        super().__init__(LABEL_NOT_FOUND_MESSAGE)
+
+
+class CommentNotFoundError(ApplicationError):
+    status_code = HTTPStatus.NOT_FOUND
+
+    def __init__(self) -> None:
+        super().__init__(COMMENT_NOT_FOUND_MESSAGE)
+
+
+class TaskLabelNotFoundError(ApplicationError):
+    status_code = HTTPStatus.NOT_FOUND
+
+    def __init__(self) -> None:
+        super().__init__(TASK_LABEL_NOT_FOUND_MESSAGE)
+
+
+class LabelProjectMismatchError(ApplicationError):
+    status_code = HTTPStatus.UNPROCESSABLE_ENTITY
+
+    def __init__(self) -> None:
+        super().__init__(LABEL_PROJECT_MISMATCH_MESSAGE)
+
+
+class CommentAuthorError(ApplicationError):
+    status_code = HTTPStatus.FORBIDDEN
+
+    def __init__(self) -> None:
+        super().__init__(COMMENT_AUTHOR_MESSAGE)
 
 
 class WorkspaceNotFoundError(ApplicationError):
