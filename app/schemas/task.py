@@ -61,8 +61,3 @@ class TaskRead(BaseModel):
     status: TaskStatus
     created_at: datetime
     updated_at: datetime
-
-
-class TaskListRead(BaseModel):
-    items: list[TaskRead]
-    total: int

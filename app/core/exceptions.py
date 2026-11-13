@@ -14,6 +14,8 @@ from app.core.constants import (
     PROJECT_ARCHIVED_MESSAGE,
     PROJECT_NOT_FOUND_MESSAGE,
     TASK_NOT_FOUND_MESSAGE,
+    WORKSPACE_MEMBER_NOT_FOUND_MESSAGE,
+    WORKSPACE_NOT_FOUND_MESSAGE,
 )
 
 
@@ -71,3 +73,30 @@ class ProjectArchivedError(ApplicationError):
 
     def __init__(self) -> None:
         super().__init__(PROJECT_ARCHIVED_MESSAGE)
+
+
+class WorkspaceNotFoundError(ApplicationError):
+    """A workspace is missing or outside the caller's visibility."""
+
+    status_code = HTTPStatus.NOT_FOUND
+
+    def __init__(self) -> None:
+        super().__init__(WORKSPACE_NOT_FOUND_MESSAGE)
+
+
+class WorkspaceMemberNotFoundError(ApplicationError):
+    """A requested registered user or workspace membership is missing."""
+
+    status_code = HTTPStatus.NOT_FOUND
+
+    def __init__(self) -> None:
+        super().__init__(WORKSPACE_MEMBER_NOT_FOUND_MESSAGE)
+
+
+class WorkspaceConflictError(ApplicationError):
+    """A workspace membership operation conflicts with current state."""
+
+    status_code = HTTPStatus.CONFLICT
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)

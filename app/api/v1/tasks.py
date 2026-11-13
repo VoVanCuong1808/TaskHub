@@ -10,7 +10,8 @@ from fastapi import APIRouter, Query, Response, status
 from app.core.constants import TASK_NOT_FOUND_DESCRIPTION
 from app.core.deps import CurrentUserDep, TaskServiceDep
 from app.models.enums import TaskStatus
-from app.schemas.task import TaskCreate, TaskListRead, TaskRead, TaskUpdate
+from app.schemas.common import Page, PaginationParams
+from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -32,7 +33,7 @@ async def create_task(
 
 @router.get(
     "",
-    response_model=TaskListRead,
+    response_model=Page[TaskRead],
     summary="List tasks",
     description="Requires a Bearer access token and project_id for a workspace you can access.",
 )
@@ -40,20 +41,19 @@ async def list_tasks(
     service: TaskServiceDep,
     user: CurrentUserDep,
     project_id: Annotated[UUID, Query(description="Project scope")],
+    pagination: Annotated[PaginationParams, Query()],
     task_status: Annotated[
         TaskStatus | None, Query(alias="status", description="Filter by status")
     ] = None,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(ge=1, le=200)] = 100,
-) -> TaskListRead:
+) -> Page[TaskRead]:
     tasks, total = await service.list(
         project_id=project_id,
         user_id=user.id,
         status=task_status,
-        offset=offset,
-        limit=limit,
+        offset=pagination.offset,
+        limit=pagination.limit,
     )
-    return TaskListRead(
+    return Page[TaskRead](
         items=[TaskRead.model_validate(task) for task in tasks], total=total
     )
 

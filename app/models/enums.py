@@ -28,12 +28,19 @@ class WorkspaceRole(str, Enum):
 
 
 class WorkspacePermission(str, Enum):
-    """Static permissions used by workspace-scoped task operations."""
+    """Static permissions for workspace-scoped operations."""
 
     TASK_READ = "task:read"
     TASK_CREATE = "task:create"
     TASK_UPDATE = "task:update"
     TASK_DELETE = "task:delete"
+    WORKSPACE_READ = "workspace:read"
+    WORKSPACE_UPDATE = "workspace:update"
+    WORKSPACE_DELETE = "workspace:delete"
+    MEMBER_READ = "workspace-member:read"
+    MEMBER_INVITE = "workspace-member:invite"
+    MEMBER_UPDATE = "workspace-member:update"
+    MEMBER_REMOVE = "workspace-member:remove"
 
 
 class ProjectStatus(str, Enum):

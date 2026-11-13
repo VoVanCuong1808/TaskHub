@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from app.core.authorization import (
+    effective_workspace_role,
     has_workspace_permission,
     is_workspace_write_permission,
 )
@@ -28,13 +29,11 @@ def authorize_task_access(
     permission: WorkspacePermission,
 ) -> None:
     """Raise the domain error for invisible, denied, or archived task access."""
-    owner = context.workspace_owner_id == user_id
-    if owner:
-        role = WorkspaceRole.OWNER
-    elif context.membership_role is None:
+    role = effective_workspace_role(
+        context.workspace_owner_id, user_id, context.membership_role
+    )
+    if role is None:
         raise ProjectNotFoundError()
-    else:
-        role = context.membership_role
     if not has_workspace_permission(role, permission):
         raise PermissionDeniedError()
     if (
