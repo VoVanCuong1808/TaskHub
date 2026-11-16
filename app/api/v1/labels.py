@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, Response, status
 
 from app.api.pagination import PaginationDep
 from app.api.responses import error_responses
-from app.core.deps import CurrentUserDep, TaskServiceDep
+from app.core.deps import CurrentUserDep, LabelServiceDep
 from app.schemas.common import Page
 from app.schemas.label import LabelCreate, LabelRead, LabelUpdate
 
@@ -21,7 +21,7 @@ router = APIRouter(tags=["labels"])
     responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
 )
 async def create_label(
-    payload: LabelCreate, service: TaskServiceDep, user: CurrentUserDep
+    payload: LabelCreate, service: LabelServiceDep, user: CurrentUserDep
 ) -> LabelRead:
     return LabelRead.model_validate(
         await service.create_label(user_id=user.id, **payload.model_dump())
@@ -34,7 +34,7 @@ async def create_label(
     responses=error_responses(401, 404, 422),
 )
 async def list_labels(
-    service: TaskServiceDep,
+    service: LabelServiceDep,
     user: CurrentUserDep,
     project_id: Annotated[UUID, Query(description="Project scope")],
     pagination: PaginationDep,
@@ -56,7 +56,7 @@ async def list_labels(
     responses=error_responses(401, 404, 422),
 )
 async def get_label(
-    label_id: UUID, service: TaskServiceDep, user: CurrentUserDep
+    label_id: UUID, service: LabelServiceDep, user: CurrentUserDep
 ) -> LabelRead:
     return LabelRead.model_validate(await service.get_label(label_id, user.id))
 
@@ -69,7 +69,7 @@ async def get_label(
 async def update_label(
     label_id: UUID,
     payload: LabelUpdate,
-    service: TaskServiceDep,
+    service: LabelServiceDep,
     user: CurrentUserDep,
 ) -> LabelRead:
     return LabelRead.model_validate(
@@ -85,7 +85,7 @@ async def update_label(
     responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
 )
 async def delete_label(
-    label_id: UUID, service: TaskServiceDep, user: CurrentUserDep
+    label_id: UUID, service: LabelServiceDep, user: CurrentUserDep
 ) -> Response:
     await service.delete_label(label_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -98,7 +98,7 @@ async def delete_label(
 )
 async def list_task_labels(
     task_id: UUID,
-    service: TaskServiceDep,
+    service: LabelServiceDep,
     user: CurrentUserDep,
     pagination: PaginationDep,
 ) -> Page[LabelRead]:
@@ -121,7 +121,7 @@ async def list_task_labels(
 async def attach_label(
     task_id: UUID,
     label_id: UUID,
-    service: TaskServiceDep,
+    service: LabelServiceDep,
     user: CurrentUserDep,
 ) -> Response:
     await service.attach_label(task_id, label_id, user.id)
@@ -136,7 +136,7 @@ async def attach_label(
 async def detach_label(
     task_id: UUID,
     label_id: UUID,
-    service: TaskServiceDep,
+    service: LabelServiceDep,
     user: CurrentUserDep,
 ) -> Response:
     await service.detach_label(task_id, label_id, user.id)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Response, status
 
 from app.api.pagination import PaginationDep
 from app.api.responses import error_responses
-from app.core.deps import CurrentUserDep, TaskServiceDep
+from app.core.deps import CommentServiceDep, CurrentUserDep
 from app.schemas.comment import CommentCreate, CommentRead, CommentUpdate
 from app.schemas.common import Page
 
@@ -22,7 +22,7 @@ router = APIRouter(tags=["comments"])
 async def create_comment(
     task_id: UUID,
     payload: CommentCreate,
-    service: TaskServiceDep,
+    service: CommentServiceDep,
     user: CurrentUserDep,
 ) -> CommentRead:
     return CommentRead.model_validate(
@@ -37,7 +37,7 @@ async def create_comment(
 )
 async def list_comments(
     task_id: UUID,
-    service: TaskServiceDep,
+    service: CommentServiceDep,
     user: CurrentUserDep,
     pagination: PaginationDep,
 ) -> Page[CommentRead]:
@@ -58,7 +58,7 @@ async def list_comments(
     responses=error_responses(401, 404, 422),
 )
 async def get_comment(
-    comment_id: UUID, service: TaskServiceDep, user: CurrentUserDep
+    comment_id: UUID, service: CommentServiceDep, user: CurrentUserDep
 ) -> CommentRead:
     return CommentRead.model_validate(
         await service.get_comment(comment_id, user.id)
@@ -73,7 +73,7 @@ async def get_comment(
 async def update_comment(
     comment_id: UUID,
     payload: CommentUpdate,
-    service: TaskServiceDep,
+    service: CommentServiceDep,
     user: CurrentUserDep,
 ) -> CommentRead:
     return CommentRead.model_validate(
@@ -87,7 +87,7 @@ async def update_comment(
     responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
 )
 async def delete_comment(
-    comment_id: UUID, service: TaskServiceDep, user: CurrentUserDep
+    comment_id: UUID, service: CommentServiceDep, user: CurrentUserDep
 ) -> Response:
     await service.delete_comment(comment_id, user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

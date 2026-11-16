@@ -236,13 +236,22 @@ The implementation must preserve this dependency direction:
 
 - API modules validate HTTP input, resolve the principal, call one service use
   case, serialize output, and contain no SQL, transaction, or role logic.
-- Services load facts through the UoW, call pure policies, enforce cross-row
-  rules, mutate domain/entity state, and delimit each write transaction.
+- `TaskService`, `LabelService`, and `CommentService` own their respective
+  task, label/link, and comment use cases. Shared visibility and ordered lock
+  orchestration lives in `TaskAccess`; all services receive the same request
+  UoW. Services load facts, call pure policies, enforce cross-row rules,
+  mutate domain/entity state, and delimit each write transaction.
 - Pure policy functions accept values/context objects and return/raise decisions;
   they import neither FastAPI nor SQLAlchemy and perform no I/O.
 - Repository adapters contain SQL queries, row locks, flush/add/delete, and
   persistence mapping only. They do not authorize, choose HTTP/application
   errors, commit, or roll back.
+- Task-management writes lock workspace, actor membership, then project in
+  compatible `FOR SHARE` mode before locking the task or comment being changed.
+  Assignment also share-locks the assignee membership and user rows. These
+  locks stabilize active/archive/role facts while allowing unrelated writes;
+  workspace and membership administration retains exclusive locks for
+  revocation and ownership changes.
 - A request-scoped `TaskManagementUnitOfWork` owns the shared SQLAlchemy session,
   exposes the required task/project/workspace/member/user/label/comment stores,
   and is the only task-management component with `commit`/`rollback`.

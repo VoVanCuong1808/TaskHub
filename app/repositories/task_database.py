@@ -127,11 +127,11 @@ class TaskProjectRepository:
     async def get(self, project_id: UUID) -> Project | None:
         return await self._session.get(Project, project_id)
 
-    async def get_for_update(self, project_id: UUID) -> Project | None:
+    async def get_for_share(self, project_id: UUID) -> Project | None:
         return await self._session.scalar(
             select(Project)
             .where(Project.id == project_id)
-            .with_for_update()
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
 
@@ -143,11 +143,11 @@ class TaskWorkspaceRepository:
     async def get(self, workspace_id: UUID) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
-    async def get_for_update(self, workspace_id: UUID) -> Workspace | None:
+    async def get_for_share(self, workspace_id: UUID) -> Workspace | None:
         return await self._session.scalar(
             select(Workspace)
             .where(Workspace.id == workspace_id)
-            .with_for_update()
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
 
@@ -156,7 +156,7 @@ class TaskWorkspaceRepository:
     ) -> WorkspaceMember | None:
         return await self._session.get(WorkspaceMember, (workspace_id, user_id))
 
-    async def get_member_for_update(
+    async def get_member_for_share(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMember | None:
         return await self._session.scalar(
@@ -165,7 +165,7 @@ class TaskWorkspaceRepository:
                 WorkspaceMember.workspace_id == workspace_id,
                 WorkspaceMember.user_id == user_id,
             )
-            .with_for_update()
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
 

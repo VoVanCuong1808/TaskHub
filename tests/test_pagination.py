@@ -16,7 +16,13 @@ from app.core.constants import (
     MAX_PAGINATION_PAGE,
     MAX_SQL_BIGINT,
 )
-from app.core.deps import get_current_user, get_task_service, get_workspace_service
+from app.core.deps import (
+    get_comment_service,
+    get_current_user,
+    get_label_service,
+    get_task_service,
+    get_workspace_service,
+)
 from app.schemas.common import Page, PaginationParams
 
 
@@ -73,11 +79,24 @@ class PaginationApiTests(unittest.TestCase):
             async def list_members(self, *args, **kwargs):
                 return [], 0
 
+        class LabelService:
+            async def list_labels(self, **kwargs):
+                return [], 0
+
+            async def list_task_labels(self, *args, **kwargs):
+                return [], 0
+
+        class CommentService:
+            async def list_comments(self, *args, **kwargs):
+                return [], 0
+
         app = FastAPI()
         app.include_router(api_router, prefix="/api/v1")
         app.include_router(task_alias_router, include_in_schema=False)
         app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid4())
         app.dependency_overrides[get_task_service] = TaskService
+        app.dependency_overrides[get_label_service] = LabelService
+        app.dependency_overrides[get_comment_service] = CommentService
         app.dependency_overrides[get_workspace_service] = WorkspaceService
         project_id, workspace_id, task_id = uuid4(), uuid4(), uuid4()
         paths = (

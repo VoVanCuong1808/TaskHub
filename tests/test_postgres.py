@@ -65,6 +65,8 @@ from app.models.task import Task
 from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+from app.services.comment_service import CommentService
+from app.services.label_service import LabelService
 from app.services.task_service import TaskService
 from app.services.workspace_service import WorkspaceService
 
@@ -816,7 +818,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
 
         async def attach() -> None:
             async with self.session_factory() as session:
-                await TaskService(
+                await LabelService(
                     SQLAlchemyTaskManagementUnitOfWork(session)
                 ).attach_label(data.existing.id, label_id, data.editor.id)
 
@@ -970,6 +972,80 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             {task.assignee_id for task in saved}, {data.owner.id, data.editor.id}
         )
 
+    async def test_reciprocal_member_assignments_do_not_deadlock(self) -> None:
+        data = await self._make_task_auth_fixture()
+        workspace = Workspace(
+            id=uuid4(), name="Shared assignee workspace", owner_id=data.outsider.id
+        )
+        project = Project(id=uuid4(), workspace=workspace, name="Shared assignee")
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    workspace,
+                    project,
+                    WorkspaceMember(
+                        workspace_id=workspace.id,
+                        user_id=data.owner.id,
+                        role=WorkspaceRole.EDITOR,
+                    ),
+                    WorkspaceMember(
+                        workspace_id=workspace.id,
+                        user_id=data.editor.id,
+                        role=WorkspaceRole.EDITOR,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        actor_memberships_locked = asyncio.Barrier(2)
+
+        class ActorMembershipBarrierStore:
+            def __init__(self, repository) -> None:
+                self.repository = repository
+                self.calls = 0
+
+            def __getattr__(self, name: str):
+                return getattr(self.repository, name)
+
+            async def get_member_for_share(self, workspace_id: UUID, user_id: UUID):
+                member = await self.repository.get_member_for_share(
+                    workspace_id, user_id
+                )
+                self.calls += 1
+                if self.calls == 1:
+                    await actor_memberships_locked.wait()
+                return member
+
+        async def create(actor: User, assignee: User, title: str) -> UUID:
+            async with self.session_factory() as session:
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                uow.workspaces = ActorMembershipBarrierStore(uow.workspaces)
+                task = await TaskService(uow).create(
+                    project_id=project.id,
+                    user_id=actor.id,
+                    title=title,
+                    assignee_id=assignee.id,
+                )
+                return task.id
+
+        task_ids = await asyncio.wait_for(
+            asyncio.gather(
+                create(data.owner, data.editor, "Owner assigns editor"),
+                create(data.editor, data.owner, "Editor assigns owner"),
+            ),
+            timeout=10,
+        )
+        async with self.session_factory() as session:
+            saved = list(
+                await session.scalars(
+                    select(TaskRow).where(TaskRow.id.in_(task_ids))
+                )
+            )
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(
+            {task.assignee_id for task in saved}, {data.owner.id, data.editor.id}
+        )
+
     async def test_assignee_share_lock_blocks_deactivation_until_create_commits(
         self,
     ) -> None:
@@ -1079,6 +1155,67 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.description, "description retained")
         self.assertEqual(saved.status, TaskStatus.IN_PROGRESS)
 
+    async def test_writes_to_distinct_tasks_in_one_project_share_parent_locks(
+        self,
+    ) -> None:
+        data = await self._make_task_auth_fixture()
+        second_task = TaskRow(
+            project_id=data.project.id,
+            title="Second concurrent task",
+            created_by=data.editor.id,
+        )
+        async with self.session_factory() as session:
+            session.add(second_task)
+            await session.commit()
+
+        first_at_save = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def update_first() -> None:
+            async with self.session_factory() as session:
+                uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                save = uow.tasks.save
+
+                async def hold_save(task: Task) -> Task | None:
+                    first_at_save.set()
+                    await release_first.wait()
+                    return await save(task)
+
+                uow.tasks.save = hold_save
+                await TaskService(uow).update(
+                    data.existing.id,
+                    {"description": "first writer"},
+                    data.editor.id,
+                )
+
+        async def update_second() -> None:
+            await first_at_save.wait()
+            async with self.session_factory() as session:
+                await TaskService(
+                    SQLAlchemyTaskManagementUnitOfWork(session)
+                ).update(
+                    second_task.id,
+                    {"description": "second writer"},
+                    data.editor.id,
+                )
+
+        first = asyncio.create_task(update_first())
+        second = asyncio.create_task(update_second())
+        second_completed = False
+        try:
+            await asyncio.wait_for(second, timeout=5)
+            second_completed = True
+        finally:
+            release_first.set()
+            await asyncio.wait_for(first, timeout=5)
+        self.assertTrue(second_completed)
+
+        async with self.session_factory() as session:
+            first_saved = await session.get(TaskRow, data.existing.id)
+            second_saved = await session.get(TaskRow, second_task.id)
+        self.assertEqual(first_saved.description, "first writer")
+        self.assertEqual(second_saved.description, "second writer")
+
     async def test_label_write_serializes_with_member_role_downgrade(self) -> None:
         data = await self._make_task_auth_fixture()
         async with self.session_factory() as session:
@@ -1120,7 +1257,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 writer_pid_ready.set()
                 try:
-                    await TaskService(
+                    await LabelService(
                         SQLAlchemyTaskManagementUnitOfWork(session)
                     ).attach_label(data.existing.id, label_id, data.editor.id)
                 except PermissionDeniedError:
@@ -1165,7 +1302,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 writer_pid = await session.scalar(text("SELECT pg_backend_pid()"))
                 writer_pid_ready.set()
                 try:
-                    await TaskService(
+                    await CommentService(
                         SQLAlchemyTaskManagementUnitOfWork(session)
                     ).create_comment(data.existing.id, data.owner.id, "racing write")
                 except TaskNotFoundError:

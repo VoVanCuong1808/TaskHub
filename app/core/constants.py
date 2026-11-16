@@ -52,8 +52,8 @@ AUTH_NOT_AUTHENTICATED_MESSAGE = "Not authenticated"
 AUTH_INACTIVE_ACCOUNT_MESSAGE = "Invalid or inactive account"
 AUTH_CURRENT_PASSWORD_INVALID_MESSAGE = "Current password is incorrect"
 AUTH_UNTRUSTED_ORIGIN_MESSAGE = "Untrusted Origin"
-INVALID_NAME_MESSAGE = "must not contain null characters"
-INVALID_CONTENT_MESSAGE = "must not contain null characters"
+INVALID_TEXT_MESSAGE = "must not contain null characters"
+DUE_DATE_TIMEZONE_MESSAGE = "due_date must include a timezone"
 
 DEFAULT_PAGE_LIMIT = 20
 MAX_PAGE_LIMIT = 200

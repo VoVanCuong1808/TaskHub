@@ -7,25 +7,22 @@ from pydantic import BaseModel, BeforeValidator, Field, RootModel
 from app.core.constants import (
     DEFAULT_PAGE_LIMIT,
     FULL_NAME_MAX_LENGTH,
-    INVALID_NAME_MESSAGE,
+    INVALID_TEXT_MESSAGE,
     MAX_PAGE_LIMIT,
     MAX_PAGINATION_PAGE,
 )
 
 
-def normalize_full_name(value: object) -> object:
+def normalize_trimmed_text(value: object) -> object:
     if isinstance(value, str):
         value = value.strip()
         if "\x00" in value:
-            raise ValueError(INVALID_NAME_MESSAGE)
+            raise ValueError(INVALID_TEXT_MESSAGE)
     return value
 
 
-FullName = Annotated[
-    str,
-    BeforeValidator(normalize_full_name),
-    Field(min_length=1, max_length=FULL_NAME_MAX_LENGTH),
-]
+TrimmedText = Annotated[str, BeforeValidator(normalize_trimmed_text)]
+FullName = Annotated[TrimmedText, Field(min_length=1, max_length=FULL_NAME_MAX_LENGTH)]
 
 class PaginationParams(BaseModel):
     """Validated one-based page pagination shared by collection endpoints."""

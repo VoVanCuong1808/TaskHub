@@ -12,13 +12,15 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from app.api.v1.tasks import router as task_router
+from app.core.constants import INVALID_TEXT_MESSAGE
 from app.core.deps import get_current_user, get_task_service
 from app.core.exceptions import (
     CommentAuthorError,
     InvalidAssigneeError,
+    LabelNotFoundError,
     LabelProjectMismatchError,
     PermissionDeniedError,
     ProjectArchivedError,
@@ -42,8 +44,12 @@ from app.models.enums import (
 )
 from app.models.task import Task
 from app.schemas.comment import CommentCreate, CommentUpdate
+from app.schemas.common import FullName
 from app.schemas.label import LabelCreate, LabelUpdate
 from app.schemas.task import TaskCreate, TaskUpdate
+from app.schemas.workspace import WorkspaceCreate
+from app.services.comment_service import CommentService
+from app.services.label_service import LabelService
 from app.services.task_service import TaskService
 
 
@@ -113,8 +119,8 @@ class FakeProjectStore:
         self.events.append("get_project")
         return self.items.get(project_id)
 
-    async def get_for_update(self, project_id: UUID) -> Project | None:
-        self.events.append("lock_project")
+    async def get_for_share(self, project_id: UUID) -> Project | None:
+        self.events.append("share_project")
         return self.items.get(project_id)
 
 
@@ -128,8 +134,8 @@ class FakeWorkspaceStore:
         self.events.append("get_workspace")
         return self.items.get(workspace_id)
 
-    async def get_for_update(self, workspace_id: UUID) -> Workspace | None:
-        self.events.append("lock_workspace")
+    async def get_for_share(self, workspace_id: UUID) -> Workspace | None:
+        self.events.append("share_workspace")
         return self.items.get(workspace_id)
 
     async def get_member(
@@ -138,10 +144,10 @@ class FakeWorkspaceStore:
         self.events.append(f"get_member:{user_id}")
         return self.members.get((workspace_id, user_id))
 
-    async def get_member_for_update(
+    async def get_member_for_share(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMember | None:
-        self.events.append(f"lock_member:{user_id}")
+        self.events.append(f"share_member:{user_id}")
         return self.members.get((workspace_id, user_id))
 
 
@@ -377,6 +383,30 @@ class TaskSchemaTests(unittest.TestCase):
             ):
                 schema.model_validate(payload)
 
+    def test_shared_text_normalizer_has_one_null_character_contract(self) -> None:
+        schemas = (
+            lambda value: LabelCreate(
+                project_id=uuid4(), name=value, color="blue"
+            ).name,
+            lambda value: CommentCreate(content=value).content,
+            lambda value: WorkspaceCreate(name=value).name,
+            lambda value: TypeAdapter(FullName).validate_python(value),
+        )
+        self.assertEqual(
+            (
+                LabelCreate(project_id=uuid4(), name="  label  ", color="blue").name,
+                CommentCreate(content="  comment  ").content,
+                WorkspaceCreate(name="  workspace  ").name,
+            ),
+            ("label", "comment", "workspace"),
+        )
+        messages = []
+        for validate in schemas:
+            with self.assertRaises(ValidationError) as caught:
+                validate("bad\x00text")
+            messages.append(caught.exception.errors()[0]["ctx"]["error"].args[0])
+        self.assertEqual(messages, [INVALID_TEXT_MESSAGE] * len(schemas))
+
 
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -421,6 +451,8 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         self.service = TaskService(self.uow)
+        self.label_service = LabelService(self.uow)
+        self.comment_service = CommentService(self.uow)
 
     async def _create(self, assignee_id: UUID | None = None) -> Task:
         return await self.service.create(
@@ -461,10 +493,10 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._create(self.editor.id)
 
         expected = [
-            "lock_workspace",
-            f"lock_member:{self.owner.id}",
-            "lock_project",
-            f"lock_member:{self.editor.id}",
+            "share_workspace",
+            f"share_member:{self.owner.id}",
+            "share_project",
+            f"share_member:{self.editor.id}",
             f"share_user:{self.editor.id}",
             "add_task",
             "commit",
@@ -509,7 +541,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.title, "concurrent title")
         self.assertEqual(updated.description, "mine")
         self.assertLess(
-            self.uow.events.index("lock_project"),
+            self.uow.events.index("share_project"),
             self.uow.events.index("lock_task"),
         )
 
@@ -525,14 +557,14 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_label_update_whitelists_mutable_fields(self) -> None:
-        label = await self.service.create_label(
+        label = await self.label_service.create_label(
             project_id=self.project.id,
             user_id=self.owner.id,
             name="Label",
             color="blue",
         )
         with self.assertRaises(ValueError):
-            await self.service.update_label(
+            await self.label_service.update_label(
                 label.id, {"project_id": uuid4()}, self.owner.id
             )
         self.assertEqual(label.project_id, self.project.id)
@@ -548,13 +580,13 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         return task
 
     async def test_label_crud_role_matrix_pagination_and_immutable_project(self) -> None:
-        first = await self.service.create_label(
+        first = await self.label_service.create_label(
             project_id=self.project.id,
             user_id=self.editor.id,
             name="First",
             color="blue",
         )
-        second = await self.service.create_label(
+        second = await self.label_service.create_label(
             project_id=self.project.id,
             user_id=self.owner.id,
             name="Second",
@@ -562,7 +594,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         first.created_at = datetime.now(UTC) - timedelta(seconds=1)
         second.created_at = datetime.now(UTC)
-        labels, total = await self.service.list_labels(
+        labels, total = await self.label_service.list_labels(
             project_id=self.project.id,
             user_id=self.viewer.id,
             offset=1,
@@ -572,13 +604,13 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([label.id for label in labels], [second.id])
         self.assertEqual(self.uow.commit_count, 2)
 
-        updated = await self.service.update_label(
+        updated = await self.label_service.update_label(
             first.id, {"name": "Renamed"}, self.owner.id
         )
         self.assertEqual(updated.name, "Renamed")
         self.assertEqual(updated.project_id, self.project.id)
         with self.assertRaises(PermissionDeniedError):
-            await self.service.create_label(
+            await self.label_service.create_label(
                 project_id=self.project.id,
                 user_id=self.viewer.id,
                 name="Denied",
@@ -587,23 +619,23 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_label_attach_is_idempotent_and_detach_requires_link(self) -> None:
         task = self._stored_task()
-        label = await self.service.create_label(
+        label = await self.label_service.create_label(
             project_id=self.project.id,
             user_id=self.owner.id,
             name="Attached",
             color="blue",
         )
-        await self.service.attach_label(task.id, label.id, self.owner.id)
-        await self.service.attach_label(task.id, label.id, self.owner.id)
+        await self.label_service.attach_label(task.id, label.id, self.owner.id)
+        await self.label_service.attach_label(task.id, label.id, self.owner.id)
         self.assertEqual(self.uow.labels.links, {(task.id, label.id)})
 
-        labels, total = await self.service.list_task_labels(
+        labels, total = await self.label_service.list_task_labels(
             task.id, self.viewer.id
         )
         self.assertEqual((labels, total), ([label], 1))
-        await self.service.detach_label(task.id, label.id, self.owner.id)
+        await self.label_service.detach_label(task.id, label.id, self.owner.id)
         with self.assertRaises(TaskLabelNotFoundError):
-            await self.service.detach_label(task.id, label.id, self.owner.id)
+            await self.label_service.detach_label(task.id, label.id, self.owner.id)
 
     async def test_cross_project_label_and_archived_label_write_rules(self) -> None:
         sibling = Project(
@@ -611,25 +643,24 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.uow.projects.items[sibling.id] = sibling
         task = self._stored_task()
-        label = await self.service.create_label(
+        label = await self.label_service.create_label(
             project_id=sibling.id,
             user_id=self.owner.id,
             name="Sibling",
             color="orange",
         )
         with self.assertRaises(LabelProjectMismatchError):
-            await self.service.attach_label(task.id, label.id, self.owner.id)
+            await self.label_service.attach_label(task.id, label.id, self.owner.id)
 
-        with self.assertRaises(Exception) as caught:
-            await self.service.attach_label(task.id, uuid4(), self.viewer.id)
-        self.assertEqual(getattr(caught.exception, "status_code", None), 404)
+        with self.assertRaises(LabelNotFoundError):
+            await self.label_service.attach_label(task.id, uuid4(), self.viewer.id)
 
         with self.assertRaises(PermissionDeniedError):
-            await self.service.attach_label(task.id, label.id, self.viewer.id)
+            await self.label_service.attach_label(task.id, label.id, self.viewer.id)
 
         self.project.status = ProjectStatus.ARCHIVED
         with self.assertRaises(ProjectArchivedError):
-            await self.service.create_label(
+            await self.label_service.create_label(
                 project_id=self.project.id,
                 user_id=self.owner.id,
                 name="Archived",
@@ -638,15 +669,15 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_comment_author_role_archived_ordering_and_pagination(self) -> None:
         task = self._stored_task()
-        first = await self.service.create_comment(
+        first = await self.comment_service.create_comment(
             task.id, self.editor.id, "first"
         )
-        second = await self.service.create_comment(
+        second = await self.comment_service.create_comment(
             task.id, self.owner.id, "second"
         )
         first.created_at = datetime.now(UTC) - timedelta(seconds=1)
         second.created_at = datetime.now(UTC)
-        comments, total = await self.service.list_comments(
+        comments, total = await self.comment_service.list_comments(
             task.id, self.viewer.id, offset=1, limit=1
         )
         self.assertEqual(total, 2)
@@ -654,18 +685,18 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.author_id, self.editor.id)
 
         with self.assertRaises(CommentAuthorError):
-            await self.service.update_comment(first.id, self.owner.id, "owner edit")
+            await self.comment_service.update_comment(first.id, self.owner.id, "owner edit")
         self.uow.events.clear()
-        updated = await self.service.update_comment(
+        updated = await self.comment_service.update_comment(
             first.id, self.editor.id, "author edit"
         )
         self.assertEqual(updated.content, "author edit")
         self.assertLess(
-            self.uow.events.index("lock_workspace"),
-            self.uow.events.index("lock_project"),
+            self.uow.events.index("share_workspace"),
+            self.uow.events.index("share_project"),
         )
         self.assertLess(
-            self.uow.events.index("lock_project"),
+            self.uow.events.index("share_project"),
             self.uow.events.index("lock_task"),
         )
         self.assertLess(
@@ -677,13 +708,13 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             WorkspaceRole.VIEWER
         )
         with self.assertRaises(PermissionDeniedError):
-            await self.service.delete_comment(first.id, self.editor.id)
+            await self.comment_service.delete_comment(first.id, self.editor.id)
 
         self.project.status = ProjectStatus.ARCHIVED
         with self.assertRaises(ProjectArchivedError):
-            await self.service.create_comment(task.id, self.owner.id, "archived")
+            await self.comment_service.create_comment(task.id, self.owner.id, "archived")
         self.assertEqual(
-            (await self.service.get_comment(second.id, self.viewer.id)).id,
+            (await self.comment_service.get_comment(second.id, self.viewer.id)).id,
             second.id,
         )
 

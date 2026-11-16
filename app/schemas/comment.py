@@ -3,22 +3,13 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.constants import INVALID_CONTENT_MESSAGE
+from app.schemas.common import TrimmedText
 
 
 class CommentPayload(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    content: str = Field(min_length=1)
-
-    @field_validator("content", mode="before")
-    @classmethod
-    def reject_nul(cls, value: object) -> object:
-        if isinstance(value, str) and "\x00" in value:
-            raise ValueError(INVALID_CONTENT_MESSAGE)
-        return value
+    content: TrimmedText = Field(min_length=1)
 
 
 class CommentCreate(CommentPayload):

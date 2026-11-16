@@ -10,6 +10,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from app.core.constants import (
     DESCRIPTION_MAX_LENGTH,
+    DUE_DATE_TIMEZONE_MESSAGE,
     EXPLICIT_NULL_MESSAGE,
     TITLE_MAX_LENGTH,
     TITLE_MIN_LENGTH,
@@ -21,7 +22,7 @@ def normalize_aware_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("due_date must include a timezone")
+        raise ValueError(DUE_DATE_TIMEZONE_MESSAGE)
     return value.astimezone(UTC)
 
 
