@@ -7,50 +7,64 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Response, status
 
-from app.core.constants import TASK_NOT_FOUND_DESCRIPTION
+from app.api.pagination import PaginationDep
+from app.api.responses import error_responses
 from app.core.deps import CurrentUserDep, TaskServiceDep
-from app.models.enums import TaskStatus
-from app.schemas.common import Page, PaginationParams
+from app.models.enums import TaskPriority, TaskStatus
+from app.schemas.common import Page
 from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
-
-NOT_FOUND_RESPONSE = {404: {"description": TASK_NOT_FOUND_DESCRIPTION}}
-
 
 @router.post(
     "",
     response_model=TaskRead,
     status_code=status.HTTP_201_CREATED,
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
     summary="Create a task",
     description="Requires a Bearer access token and an accessible project_id. Workspace owners and editors can create tasks.",
 )
 async def create_task(
     payload: TaskCreate, service: TaskServiceDep, user: CurrentUserDep
 ) -> TaskRead:
-    return TaskRead.model_validate(await service.create(payload, user.id))
+    return TaskRead.model_validate(
+        await service.create(user_id=user.id, **payload.model_dump())
+    )
 
 
 @router.get(
     "",
     response_model=Page[TaskRead],
+    responses=error_responses(401, 404, 422),
     summary="List tasks",
-    description="Requires a Bearer access token and project_id for a workspace you can access.",
+    description=(
+        "Requires a Bearer access token and project_id for a workspace you can "
+        "access. Combine status, priority, and assignee_id filters with AND. "
+        "Use one-based page with limit. Offset pagination is no longer supported."
+    ),
 )
 async def list_tasks(
     service: TaskServiceDep,
     user: CurrentUserDep,
     project_id: Annotated[UUID, Query(description="Project scope")],
-    pagination: Annotated[PaginationParams, Query()],
+    pagination: PaginationDep,
     task_status: Annotated[
         TaskStatus | None, Query(alias="status", description="Filter by status")
+    ] = None,
+    priority: Annotated[
+        TaskPriority | None, Query(description="Filter by priority")
+    ] = None,
+    assignee_id: Annotated[
+        UUID | None, Query(description="Filter by assigned user")
     ] = None,
 ) -> Page[TaskRead]:
     tasks, total = await service.list(
         project_id=project_id,
         user_id=user.id,
         status=task_status,
-        offset=pagination.offset,
+        priority=priority,
+        assignee_id=assignee_id,
+        offset=pagination.effective_offset,
         limit=pagination.limit,
     )
     return Page[TaskRead](
@@ -61,7 +75,7 @@ async def list_tasks(
 @router.get(
     "/{task_id}",
     response_model=TaskRead,
-    responses=NOT_FOUND_RESPONSE,
+    responses=error_responses(401, 404, 422),
     summary="Get a task",
     description="Requires a Bearer access token and workspace visibility for the task.",
 )
@@ -74,20 +88,24 @@ async def get_task(
 @router.patch(
     "/{task_id}",
     response_model=TaskRead,
-    responses=NOT_FOUND_RESPONSE,
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
     summary="Partially update a task",
     description="Requires a Bearer access token and an owner or editor role in the task workspace.",
 )
 async def update_task(
     task_id: UUID, payload: TaskUpdate, service: TaskServiceDep, user: CurrentUserDep
 ) -> TaskRead:
-    return TaskRead.model_validate(await service.update(task_id, payload, user.id))
+    return TaskRead.model_validate(
+        await service.update(
+            task_id, payload.model_dump(exclude_unset=True), user.id
+        )
+    )
 
 
 @router.delete(
     "/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses=NOT_FOUND_RESPONSE,
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
     summary="Delete a task",
     description="Requires a Bearer access token and an owner or editor role in the task workspace.",
 )

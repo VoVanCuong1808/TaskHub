@@ -47,6 +47,15 @@ class WorkspacePermissionTests(unittest.TestCase):
                     WorkspacePermission.TASK_CREATE,
                     WorkspacePermission.TASK_UPDATE,
                     WorkspacePermission.TASK_DELETE,
+                    WorkspacePermission.LABEL_READ,
+                    WorkspacePermission.LABEL_CREATE,
+                    WorkspacePermission.LABEL_UPDATE,
+                    WorkspacePermission.LABEL_DELETE,
+                    WorkspacePermission.TASK_LABEL_UPDATE,
+                    WorkspacePermission.COMMENT_READ,
+                    WorkspacePermission.COMMENT_CREATE,
+                    WorkspacePermission.COMMENT_UPDATE,
+                    WorkspacePermission.COMMENT_DELETE,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
                 }
@@ -54,6 +63,8 @@ class WorkspacePermissionTests(unittest.TestCase):
             WorkspaceRole.VIEWER: frozenset(
                 {
                     WorkspacePermission.TASK_READ,
+                    WorkspacePermission.LABEL_READ,
+                    WorkspacePermission.COMMENT_READ,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
                 }
@@ -81,6 +92,8 @@ class WorkspacePermissionTests(unittest.TestCase):
             WORKSPACE_WRITE_PERMISSIONS,
             frozenset(WorkspacePermission) - {
                 WorkspacePermission.TASK_READ,
+                WorkspacePermission.LABEL_READ,
+                WorkspacePermission.COMMENT_READ,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
             },
@@ -91,6 +104,8 @@ class WorkspacePermissionTests(unittest.TestCase):
             frozenset(
                 {
                     WorkspacePermission.TASK_READ,
+                    WorkspacePermission.LABEL_READ,
+                    WorkspacePermission.COMMENT_READ,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
                 }

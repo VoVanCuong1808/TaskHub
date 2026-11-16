@@ -3,6 +3,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import DEFAULT_PAGE_LIMIT
 from app.db.base import Base
 
 
@@ -16,7 +17,9 @@ class BaseRepository[Model: Base]:
     async def get(self, item_id):
         return await self.session.get(self.model, item_id)
 
-    async def list(self, *, offset: int = 0, limit: int = 100) -> list[Model]:
+    async def list(
+        self, *, offset: int = 0, limit: int = DEFAULT_PAGE_LIMIT
+    ) -> list[Model]:
         result = await self.session.scalars(
             select(self.model).offset(offset).limit(limit)
         )

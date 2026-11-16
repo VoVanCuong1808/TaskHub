@@ -16,29 +16,50 @@ from app.core.config import Settings
 from app.core.constants import AUTH_NOT_AUTHENTICATED_MESSAGE
 from app.core.exceptions import AuthenticationError
 from app.db.base import get_db
+from app.db.task_uow import SQLAlchemyTaskManagementUnitOfWork
 from app.db.workspace_uow import SQLAlchemyWorkspaceUnitOfWork
 from app.models.entities import User
-from app.repositories.task_database import TaskRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+from app.services.comment_service import CommentService
+from app.services.label_service import LabelService
 from app.services.task_service import TaskService
+from app.services.task_uow import TaskManagementUnitOfWork
 from app.services.workspace_service import WorkspaceService
 from app.services.workspace_uow import WorkspaceUnitOfWork
 
 
-def get_task_repository(
+def get_task_unit_of_work(
     session: Annotated[AsyncSession, Depends(get_db)],
-) -> TaskRepository:
-    return TaskRepository(session)
+) -> TaskManagementUnitOfWork:
+    return SQLAlchemyTaskManagementUnitOfWork(session)
 
 
 def get_task_service(
-    repository: Annotated[TaskRepository, Depends(get_task_repository)],
+    uow: Annotated[TaskManagementUnitOfWork, Depends(get_task_unit_of_work)],
 ) -> TaskService:
-    return TaskService(repository)
+    return TaskService(uow)
 
 
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
+
+
+def get_label_service(
+    uow: Annotated[TaskManagementUnitOfWork, Depends(get_task_unit_of_work)],
+) -> LabelService:
+    return LabelService(uow)
+
+
+LabelServiceDep = Annotated[LabelService, Depends(get_label_service)]
+
+
+def get_comment_service(
+    uow: Annotated[TaskManagementUnitOfWork, Depends(get_task_unit_of_work)],
+) -> CommentService:
+    return CommentService(uow)
+
+
+CommentServiceDep = Annotated[CommentService, Depends(get_comment_service)]
 
 
 def get_app_settings(request: Request) -> Settings:

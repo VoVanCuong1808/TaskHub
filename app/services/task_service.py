@@ -1,51 +1,57 @@
-"""Task business rules.
+"""Task CRUD use cases and transaction boundaries."""
 
-Services own orchestration and raise domain exceptions; they never import
-FastAPI. HTTP translation lives in ``app.main``.
-"""
-
-from __future__ import annotations
-
-import logging
-from collections.abc import Awaitable
-from typing import TypeVar
+from collections.abc import Mapping
+from datetime import datetime
 from uuid import UUID
 
-from app.models.enums import TaskStatus
+from app.core.constants import DEFAULT_PAGE_LIMIT
+from app.core.exceptions import TaskNotFoundError
+from app.models.enums import TaskPriority, TaskStatus, WorkspacePermission
 from app.models.task import Task
-from app.repositories.task_repo import TaskRepositoryProtocol
-from app.schemas.task import TaskCreate, TaskUpdate
+from app.services.task_access import TaskAccess
+from app.services.task_transaction import task_transaction
+from app.services.task_uow import TaskManagementUnitOfWork
 
-logger = logging.getLogger("taskhub")
-
-T = TypeVar("T")
+TASK_UPDATE_FIELDS = frozenset(
+    {"title", "description", "status", "priority", "due_date", "assignee_id"}
+)
 
 
 class TaskService:
-    """Orchestrates domain models; never stores or returns transport schemas."""
+    def __init__(self, uow: TaskManagementUnitOfWork) -> None:
+        self._uow = uow
+        self._access = TaskAccess(uow)
 
-    def __init__(self, repository: TaskRepositoryProtocol) -> None:
-        self._repository = repository
-
-    async def _transaction(self, operation: Awaitable[T]) -> T:
-        try:
-            result = await operation
-            await self._repository.commit()
-        except BaseException:
-            logger.warning("Task transaction failed; rolling back")
-            await self._repository.rollback()
-            raise
-        return result
-
-    async def create(self, payload: TaskCreate, user_id: UUID) -> Task:
-        task = Task(
-            title=payload.title,
-            description=payload.description,
-            status=payload.status,
-        )
-        return await self._transaction(
-            self._repository.add(task, project_id=payload.project_id, user_id=user_id)
-        )
+    async def create(
+        self,
+        *,
+        project_id: UUID,
+        user_id: UUID,
+        title: str,
+        description: str = "",
+        status: TaskStatus = TaskStatus.TODO,
+        priority: TaskPriority = TaskPriority.MEDIUM,
+        due_date: datetime | None = None,
+        assignee_id: UUID | None = None,
+    ) -> Task:
+        async with task_transaction(self._uow):
+            grant = await self._access.project(
+                project_id, user_id, WorkspacePermission.TASK_CREATE, write=True
+            )
+            if assignee_id is not None:
+                await self._access.assignee(grant.workspace, assignee_id)
+            return await self._uow.tasks.add(
+                Task(
+                    project_id=project_id,
+                    created_by=user_id,
+                    title=title,
+                    description=description,
+                    status=status,
+                    priority=priority,
+                    due_date=due_date,
+                    assignee_id=assignee_id,
+                )
+            )
 
     async def list(
         self,
@@ -53,29 +59,52 @@ class TaskService:
         project_id: UUID,
         user_id: UUID,
         status: TaskStatus | None = None,
+        priority: TaskPriority | None = None,
+        assignee_id: UUID | None = None,
         offset: int = 0,
-        limit: int = 100,
+        limit: int = DEFAULT_PAGE_LIMIT,
     ) -> tuple[list[Task], int]:
-        return await self._repository.list(
+        await self._access.project(
+            project_id, user_id, WorkspacePermission.TASK_READ, write=False
+        )
+        return await self._uow.tasks.list(
             project_id=project_id,
-            user_id=user_id,
             status=status,
+            priority=priority,
+            assignee_id=assignee_id,
             offset=offset,
             limit=limit,
         )
 
     async def get(self, task_id: UUID, user_id: UUID) -> Task:
-        return await self._repository.get(task_id, user_id=user_id)
+        task, _ = await self._access.task(
+            task_id, user_id, WorkspacePermission.TASK_READ, write=False
+        )
+        return task
 
-    async def update(self, task_id: UUID, payload: TaskUpdate, user_id: UUID) -> Task:
-        async def operation() -> Task:
-            task = await self._repository.get_for_update(task_id, user_id=user_id)
-            for attribute, value in payload.model_dump(exclude_unset=True).items():
+    async def update(
+        self, task_id: UUID, changes: Mapping[str, object], user_id: UUID
+    ) -> Task:
+        if changes.keys() - TASK_UPDATE_FIELDS:
+            raise ValueError("Unsupported task fields")
+        async with task_transaction(self._uow):
+            task, grant = await self._access.task(
+                task_id, user_id, WorkspacePermission.TASK_UPDATE, write=True
+            )
+            assignee_id = changes.get("assignee_id")
+            if "assignee_id" in changes and assignee_id is not None:
+                await self._access.assignee(grant.workspace, assignee_id)
+            for attribute, value in changes.items():
                 setattr(task, attribute, value)
             task.touch()
-            return await self._repository.save(task)
-
-        return await self._transaction(operation())
+            saved = await self._uow.tasks.save(task)
+            if saved is None:
+                raise TaskNotFoundError(task_id)
+            return saved
 
     async def delete(self, task_id: UUID, user_id: UUID) -> None:
-        await self._transaction(self._repository.delete(task_id, user_id=user_id))
+        async with task_transaction(self._uow):
+            await self._access.task(
+                task_id, user_id, WorkspacePermission.TASK_DELETE, write=True
+            )
+            await self._uow.tasks.delete(task_id)

@@ -6,29 +6,16 @@ from uuid import UUID
 
 from pydantic import (
     BaseModel,
-    BeforeValidator,
     ConfigDict,
     EmailStr,
     Field,
 )
 
-from app.core.constants import INVALID_NAME_MESSAGE, NAME_MAX_LENGTH
+from app.core.constants import NAME_MAX_LENGTH
 from app.models.enums import WorkspaceRole
+from app.schemas.common import TrimmedText
 
-
-def normalize_workspace_name(value: object) -> object:
-    if isinstance(value, str):
-        value = value.strip()
-        if "\x00" in value:
-            raise ValueError(INVALID_NAME_MESSAGE)
-    return value
-
-
-WorkspaceName = Annotated[
-    str,
-    BeforeValidator(normalize_workspace_name),
-    Field(min_length=1, max_length=NAME_MAX_LENGTH),
-]
+WorkspaceName = Annotated[TrimmedText, Field(min_length=1, max_length=NAME_MAX_LENGTH)]
 
 
 class WorkspaceCreate(BaseModel):

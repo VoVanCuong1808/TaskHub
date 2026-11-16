@@ -125,10 +125,36 @@ không nhận refresh token trong JSON hoặc Authorization header.
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
 | POST   | `/api/v1/tasks`       | 201    | Tạo task trong `project_id`   |
-| GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`status`, `offset`, `limit`) |
+| GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`status`, `priority`, `assignee_id`, `page`, `limit`) |
 | GET    | `/api/v1/tasks/{id}`  | 200/404| Chi tiết                      |
 | PATCH  | `/api/v1/tasks/{id}`  | 200/404| Cập nhật một phần             |
 | DELETE | `/api/v1/tasks/{id}`  | 204/404| Xoá                           |
+| POST   | `/api/v1/labels`      | 201    | Tạo label trong project       |
+| GET    | `/api/v1/labels?project_id={uuid}` | 200 | Danh sách label có phân trang |
+| GET/PATCH/DELETE | `/api/v1/labels/{id}` | 200/204/404 | Đọc, sửa, xoá label |
+| GET    | `/api/v1/tasks/{id}/labels` | 200 | Danh sách label của task      |
+| PUT/DELETE | `/api/v1/tasks/{task_id}/labels/{label_id}` | 204/404 | Gắn hoặc gỡ label |
+| POST/GET | `/api/v1/tasks/{id}/comments` | 201/200 | Tạo hoặc liệt kê comment |
+| GET/PATCH/DELETE | `/api/v1/comments/{id}` | 200/204/404 | Đọc, sửa, xoá comment của chính tác giả |
+
+Task create/update/read hỗ trợ thêm `priority` (`low`, `medium`, `high`,
+`urgent`), `due_date` ISO 8601 có timezone, `assignee_id`; response có thêm
+`created_by`. Assignee phải là owner hoặc user đang hoạt động có membership
+trong workspace. `due_date` được chuẩn hoá UTC. Task list yêu cầu `project_id`
+và hỗ trợ các filter kết hợp AND `status`, `priority`, `assignee_id`. Assignee
+filter chỉ so khớp UUID trên project hiện tại; UUID không tồn tại hoặc nằm
+ngoài project trả về danh sách rỗng mà không kiểm tra user. Không có filter
+due date, label hoặc text search.
+
+Pagination dùng `page` bắt đầu từ 1 và `limit` mặc định 20 (1–200). Tham số
+query `offset` đã bị loại bỏ và trả 422. Alias ẩn `/tasks` dùng cùng các filter
+và pagination.
+
+Label thuộc cố định một project và chỉ gắn được vào task cùng project. Label và
+comment dùng response phân trang `{items,total}`. OWNER/EDITOR được ghi;
+VIEWER chỉ đọc. Comment chỉ tác giả hiện còn quyền ghi task mới được sửa/xoá.
+Các endpoint label/comment chỉ có dưới `/api/v1`; alias ẩn `/tasks` tiếp tục chỉ
+phản chiếu CRUD task cũ.
 
 Ví dụ:
 
@@ -138,14 +164,38 @@ $login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/auth/l
 $accessToken = $login.access_token
 $headers = @{ Authorization = "Bearer $accessToken" }
 $projectId = "<UUID của project bạn có quyền truy cập>"
-$body = @{ project_id = $projectId; title = "Viết README"; description = "Mô tả dự án" } | ConvertTo-Json
+$body = @{
+  project_id = $projectId
+  title = "Viết README"
+  description = "Mô tả dự án"
+  priority = "high"
+  due_date = "2026-12-01T09:00:00+07:00"
+} | ConvertTo-Json
 $task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/tasks `
   -Headers $headers -ContentType "application/json" -Body $body
 
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId" -Headers $headers
 
+# Kết hợp filter và lấy trang thứ hai (các filter dùng AND)
+$assigneeId = "<UUID thành viên trong workspace>"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId&status=todo&priority=high&assignee_id=$assigneeId&page=2&limit=20" `
+  -Headers $headers
+
 Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" `
   -Headers $headers -ContentType "application/json" -Body (@{ status = "done" } | ConvertTo-Json)
+
+$label = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/labels `
+  -Headers $headers -ContentType "application/json" `
+  -Body (@{ project_id = $projectId; name = "Backend"; color = "blue" } | ConvertTo-Json)
+Invoke-RestMethod -Method Put -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)/labels/$($label.id)" `
+  -Headers $headers
+
+$comment = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)/comments" `
+  -Headers $headers -ContentType "application/json" `
+  -Body (@{ content = "Ready for review" } | ConvertTo-Json)
+Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/comments/$($comment.id)" `
+  -Headers $headers -ContentType "application/json" `
+  -Body (@{ content = "Reviewed" } | ConvertTo-Json)
 
 Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" -Headers $headers
 ```

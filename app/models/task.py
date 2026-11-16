@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from app.models.enums import TaskStatus
+from app.models.enums import TaskPriority, TaskStatus
 
 
 def utc_now() -> datetime:
@@ -24,6 +24,9 @@ class Task:
     title: str
     description: str | None = None
     status: TaskStatus = TaskStatus.TODO
+    priority: TaskPriority = TaskPriority.MEDIUM
+    due_date: datetime | None = None
+    assignee_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
     project_id: UUID | None = None
     created_by: UUID | None = None
