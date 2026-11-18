@@ -93,8 +93,10 @@ class TaskService:
                 cached = await self._cache.get(project_id, generation, query_digest)
                 if cached is not None:
                     return cached
-            except Exception:  # noqa: BLE001 - Redis failure degrades to database.
-                logger.warning("Task-list cache read failed; using database")
+            except Exception:
+                logger.warning(
+                    "Task-list cache read failed; using database", exc_info=True
+                )
                 generation = None
 
         result = await self._uow.tasks.list(
@@ -111,8 +113,8 @@ class TaskService:
                 await self._cache.set_if_current(
                     project_id, generation, query_digest, result[0], result[1]
                 )
-            except Exception:  # noqa: BLE001 - Redis failure skips cache fill.
-                logger.warning("Task-list cache fill failed")
+            except Exception:
+                logger.warning("Task-list cache fill failed", exc_info=True)
         return result
 
     async def get(self, task_id: UUID, user_id: UUID) -> Task:
@@ -155,5 +157,7 @@ class TaskService:
             return
         try:
             await self._cache.rotate(project_id)
-        except Exception:  # noqa: BLE001 - committed mutation must survive Redis failure.
-            logger.warning("Task-list cache invalidation failed after commit")
+        except Exception:
+            logger.warning(
+                "Task-list cache invalidation failed after commit", exc_info=True
+            )

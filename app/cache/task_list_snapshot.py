@@ -18,7 +18,9 @@ from app.models.task import Task
 
 
 class TaskListCacheItem(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, hide_input_in_errors=True
+    )
 
     id: UUID
     project_id: UUID
@@ -65,7 +67,9 @@ class TaskListCacheItem(BaseModel):
 
 
 class TaskListSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, hide_input_in_errors=True
+    )
 
     items: list[TaskListCacheItem]
     total: int = Field(ge=0, strict=True)

@@ -1,4 +1,4 @@
-"""Shared constants: error messages and string validation bounds."""
+"""Shared application constants."""
 
 from __future__ import annotations
 
@@ -57,5 +57,11 @@ DUE_DATE_TIMEZONE_MESSAGE = "due_date must include a timezone"
 
 DEFAULT_PAGE_LIMIT = 20
 MAX_PAGE_LIMIT = 200
+TASK_SEARCH_MAX_LENGTH = 200
+REDIS_SOCKET_TIMEOUT_SECONDS = 0.5
+REDIS_MAX_CONNECTIONS = 50
+REDIS_RETRY_COUNT = 0
+TASK_LIST_CACHE_DATA_TTL_SECONDS = 60
+TASK_LIST_CACHE_GENERATION_TTL_SECONDS = 120
 MAX_SQL_BIGINT = 9_223_372_036_854_775_807
 MAX_PAGINATION_PAGE = MAX_SQL_BIGINT // MAX_PAGE_LIMIT

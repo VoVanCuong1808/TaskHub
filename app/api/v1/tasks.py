@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Response, status
 
 from app.api.pagination import PaginationDep
 from app.api.responses import error_responses
+from app.core.constants import TASK_SEARCH_MAX_LENGTH
 from app.core.deps import CurrentUserDep, TaskServiceDep
 from app.models.enums import TaskPriority, TaskStatus
 from app.schemas.common import Page, TrimmedText
@@ -61,7 +62,10 @@ async def list_tasks(
     ] = None,
     q: Annotated[
         TrimmedText | None,
-        Query(max_length=200, description="Literal title or description search"),
+        Query(
+            max_length=TASK_SEARCH_MAX_LENGTH,
+            description="Literal title or description search",
+        ),
     ] = None,
 ) -> Page[TaskRead]:
     tasks, total = await service.list(

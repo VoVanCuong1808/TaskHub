@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 import jwt
 from fastapi import HTTPException
-from pydantic import ValidationError
+from pydantic import RedisDsn, ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -22,6 +22,11 @@ from app.api.v1.auth import (
     require_trusted_origin,
 )
 from app.core.config import Settings
+from app.core.constants import (
+    REDIS_MAX_CONNECTIONS,
+    REDIS_RETRY_COUNT,
+    REDIS_SOCKET_TIMEOUT_SECONDS,
+)
 from app.core.exceptions import AuthenticationError
 from app.core.security import (
     create_token,
@@ -368,36 +373,72 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(origins=origins), self.assertRaises(ValidationError):
                 Settings(_env_file=None, redis_url=None, frontend_origins=origins)
 
-    async def test_redis_url_validation_and_blank_disable(self) -> None:
+    async def test_redis_dsn_native_defaults_and_blank_disable(self) -> None:
         self.assertIsNone(Settings(_env_file=None, redis_url="  ").redis_url)
+        configured = Settings(
+            _env_file=None,
+            redis_url="rediss://user:password@cache.example.test:6380/2",
+        ).redis_url
+        self.assertIsInstance(configured, RedisDsn)
+        self.assertEqual(str(configured), "rediss://user:password@cache.example.test:6380/2")
+        self.assertEqual(str(Settings(_env_file=None, redis_url="redis://").redis_url), "redis://localhost:6379/0")
         self.assertEqual(
-            Settings(_env_file=None, redis_url="rediss://user:password@cache.example.test:6380/2").redis_url,
-            "rediss://user:password@cache.example.test:6380/2",
+            str(
+                Settings(
+                    _env_file=None,
+                    redis_url="redis://cache.example.test/0?socket_timeout=30",
+                ).redis_url
+            ),
+            "redis://cache.example.test:6379/0?socket_timeout=30",
         )
+        unicode_host = Settings(
+            _env_file=None,
+            redis_url="redis://u:FAKEPW@h" + chr(0xFF0F) + ":6379/0",
+        ).redis_url
+        self.assertIsInstance(unicode_host, RedisDsn)
+
         for url in (
             "http://cache.example.test",
-            "redis://",
-            "redis://cache.example.test:bad",
-            "redis://cache.example.test:0",
-            "redis://cache.example.test/db",
-            "redis://cache.example.test/0?socket_timeout=30",
-            "redis://cache.example.test/0#fragment",
-            "redis://cache.example.test/0\n",
+            "redis://u:FAKEPW@h:bad",
+            "redis://u:FAKEPW@h:65536",
         ):
-            with self.subTest(url=url), self.assertRaises(ValidationError):
-                Settings(_env_file=None, redis_url=url)
+            with self.subTest(url=url):
+                with self.assertRaises(ValidationError) as raised:
+                    Settings(_env_file=None, redis_url=url)
+                self.assertNotIn("FAKEPW", str(raised.exception))
 
-        with self.assertRaises(ValidationError) as raised:
-            Settings(_env_file=None, redis_url="redis://u:FAKEPW@h:bad")
-        error = str(raised.exception)
-        self.assertNotIn("FAKEPW", error)
-        self.assertIn("valid redis:// or rediss:// URL", error)
+    async def test_redis_query_options_cannot_override_app_runtime_limits(self) -> None:
+        from redis.asyncio.retry import Retry
 
-        with self.assertRaises(ValidationError) as raised:
-            Settings(_env_file=None, redis_url="redis://u:FAKEPW@h" + chr(0xFF0F) + ":6379/0")
-        error = str(raised.exception)
-        self.assertNotIn("FAKEPW", error)
-        self.assertIn("valid redis:// or rediss:// URL", error)
+        settings = Settings(
+            _env_file=None,
+            jwt_secret_key=SECRET,
+            redis_url=(
+                "redis://127.0.0.1:6379/0?socket_timeout=30"
+                "&socket_connect_timeout=25&max_connections=1&retry=99"
+            ),
+        )
+        self.assertIsInstance(settings.redis_url, RedisDsn)
+        engine = type("FakeEngine", (), {"dispose": AsyncMock()})()
+
+        async def seed_nothing(_session_factory) -> None:
+            return None
+
+        with (
+            patch("app.main.make_engine", return_value=engine),
+            patch("app.main.make_session_factory", return_value=object()),
+            patch("app.main.seed_default_data", new=seed_nothing),
+        ):
+            app = create_app(settings)
+            async with app.router.lifespan_context(app):
+                client = app.state.task_list_cache._client
+                options = client.connection_pool.connection_kwargs
+                self.assertEqual(options["socket_timeout"], REDIS_SOCKET_TIMEOUT_SECONDS)
+                self.assertEqual(options["socket_connect_timeout"], REDIS_SOCKET_TIMEOUT_SECONDS)
+                self.assertEqual(client.connection_pool.max_connections, REDIS_MAX_CONNECTIONS)
+                self.assertIsInstance(options["retry"], Retry)
+                self.assertEqual(options["retry"].get_retries(), REDIS_RETRY_COUNT)
+                self.assertTrue(client.auto_close_connection_pool)
 
     async def test_origin_guard_and_cors_are_exact_and_fail_closed(self) -> None:
         settings = Settings(_env_file=None, redis_url=None, frontend_origins=["https://ui.example.test"])

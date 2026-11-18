@@ -7,13 +7,14 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from app.cache.task_list_snapshot import TaskListSnapshot
+from app.core.constants import (
+    TASK_LIST_CACHE_DATA_TTL_SECONDS,
+    TASK_LIST_CACHE_GENERATION_TTL_SECONDS,
+)
 from app.models.task import Task
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
-
-DATA_TTL_SECONDS = 60
-GENERATION_TTL_SECONDS = 120
 
 _ENSURE_GENERATION = """
 local current = redis.call('GET', KEYS[1])
@@ -51,7 +52,7 @@ class RedisTaskListCache:
             1,
             self._generation_key(project_id),
             token,
-            GENERATION_TTL_SECONDS,
+            TASK_LIST_CACHE_GENERATION_TTL_SECONDS,
         )
         if not result:
             raise RuntimeError("Redis returned no project generation")
@@ -89,7 +90,7 @@ class RedisTaskListCache:
                 self._data_key(project_id, generation, query_digest),
                 generation,
                 payload,
-                DATA_TTL_SECONDS,
+                TASK_LIST_CACHE_DATA_TTL_SECONDS,
             )
         )
 
@@ -99,5 +100,5 @@ class RedisTaskListCache:
             1,
             self._generation_key(project_id),
             secrets.token_urlsafe(24),
-            GENERATION_TTL_SECONDS,
+            TASK_LIST_CACHE_GENERATION_TTL_SECONDS,
         )

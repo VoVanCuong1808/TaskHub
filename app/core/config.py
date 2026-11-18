@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_PREFIX = "TASKHUB_"
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
     database_url: str = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub"
     database_echo: bool = False
-    redis_url: str | None = None
+    redis_url: RedisDsn | None = None
     jwt_secret_key: SecretStr | None = None
     access_token_minutes: int = Field(default=15, ge=1, le=1440)
     refresh_token_days: int = Field(default=30, ge=1, le=365)
@@ -43,32 +43,6 @@ class Settings(BaseSettings):
     @classmethod
     def empty_redis_url_disables_cache(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
-
-    @field_validator("redis_url")
-    @classmethod
-    def valid_redis_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        try:
-            parsed = urlsplit(value)
-            port = parsed.port
-            hostname = parsed.hostname
-        except ValueError:
-            raise ValueError("must be a valid redis:// or rediss:// URL") from None
-        if (
-            any(character.isspace() for character in value)
-            or parsed.scheme not in {"redis", "rediss"}
-            or not hostname
-            or parsed.query
-            or parsed.fragment
-            or (port is not None and not 1 <= port <= 65535)
-            or (
-                parsed.path not in {"", "/"}
-                and not (parsed.path[1:].isascii() and parsed.path[1:].isdigit())
-            )
-        ):
-            raise ValueError("must be a valid redis:// or rediss:// URL")
-        return value
 
     @field_validator("refresh_cookie_samesite")
     @classmethod

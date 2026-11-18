@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import RedisDsn, SecretStr
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -756,8 +756,9 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             retry=Retry(NoBackoff(), 0),
         )
         settings = self._task_auth_settings().model_copy(
-            update={"redis_url": redis_url}
+            update={"redis_url": RedisDsn(redis_url)}
         )
+        self.assertIsInstance(settings.redis_url, RedisDsn)
         project_keys = f"taskhub:task-list:v1:project:{data.project.id}:*"
         try:
             with TestClient(create_app(settings)) as client:

@@ -268,9 +268,11 @@ Không đặt `TASKHUB_TEST_DATABASE_URL` trỏ vào database ứng dụng.
 ### Cache task list
 
 Đặt `TASKHUB_REDIS_URL=redis://localhost:6379/0` để bật Redis cache; URI
-`redis://` và `rediss://` được hỗ trợ, có thể kèm credentials và database index
-số như `/0`. Query string bị từ chối để không ghi đè socket timeout; URI sai làm
-settings validation thất bại ngay khi khởi động. Bỏ trống để tắt. Cache lưu
+`redis://` và `rediss://` được hỗ trợ theo `RedisDsn` của Pydantic, gồm các mặc
+định native như host `localhost` và database `/0`; có thể kèm credentials,
+database index và query options. Runtime luôn ghi đè timeout, retry và giới hạn
+pool bằng cấu hình ứng dụng. URI không hợp lệ làm settings validation thất bại
+ngay khi khởi động. Bỏ trống để tắt. Cache lưu
 snapshot JSON của task list trong 60 giây. Mỗi request vẫn đọc
 database để xác thực và kiểm tra quyền project trước khi tra cache. Sau khi task
 được tạo, sửa hoặc xóa và transaction commit thành công, service đổi generation

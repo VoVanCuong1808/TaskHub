@@ -726,16 +726,30 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
                     project_id=self.project.id, user_id=self.owner.id
                 )
             self.assertEqual((len(items), total), (1, 1))
-            self.assertTrue(any(message in line for line in logs.output))
+            record = next(record for record in logs.records if message in record.getMessage())
+            self.assertIsNotNone(record.exc_info)
+            self.assertTrue(any("OSError: redis unavailable" in line for line in logs.output))
+            self.assertTrue(any("Traceback (most recent call last)" in line for line in logs.output))
 
         service = TaskService(self.uow, BrokenCache("rotate"))
-        with self.assertLogs("taskhub", level="WARNING"):
+        commits_before = self.uow.commit_count
+        rollbacks_before = self.uow.rollback_count
+        with self.assertLogs("taskhub", level="WARNING") as logs:
             created = await service.create(
                 project_id=self.project.id,
                 user_id=self.owner.id,
                 title="still succeeds",
             )
         self.assertEqual(created.title, "still succeeds")
+        record = next(
+            record
+            for record in logs.records
+            if "cache invalidation failed after commit" in record.getMessage()
+        )
+        self.assertIsNotNone(record.exc_info)
+        self.assertTrue(any("OSError: redis unavailable" in line for line in logs.output))
+        self.assertEqual(self.uow.commit_count, commits_before + 1)
+        self.assertEqual(self.uow.rollback_count, rollbacks_before)
 
     async def test_unavailable_async_redis_client_falls_back_to_database(self) -> None:
         from redis.asyncio import Redis

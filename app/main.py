@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
+from redis.asyncio.connection import ConnectionPool, parse_url
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from sqlalchemy.exc import IntegrityError
@@ -30,6 +31,9 @@ from app.core.constants import (
     INTEGRITY_REFERENCE_MESSAGE,
     INTEGRITY_REQUIRED_MESSAGE,
     INTEGRITY_RESTRICTED_MESSAGE,
+    REDIS_MAX_CONNECTIONS,
+    REDIS_RETRY_COUNT,
+    REDIS_SOCKET_TIMEOUT_SECONDS,
 )
 from app.core.exceptions import (
     ApplicationError,
@@ -120,13 +124,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             app.state.task_list_cache = None
             if settings.redis_url:
-                redis_client = Redis.from_url(
-                    settings.redis_url,
-                    socket_connect_timeout=0.5,
-                    socket_timeout=0.5,
-                    retry=Retry(NoBackoff(), 0),
-                    max_connections=50,
+                connection_options = parse_url(str(settings.redis_url))
+                connection_options.update(
+                    socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+                    socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+                    retry=Retry(NoBackoff(), REDIS_RETRY_COUNT),
+                    max_connections=REDIS_MAX_CONNECTIONS,
                 )
+                redis_client = Redis.from_pool(ConnectionPool(**connection_options))
                 app.state.task_list_cache = RedisTaskListCache(redis_client)
             await seed_default_data(app.state.session_factory)
             logger.info(

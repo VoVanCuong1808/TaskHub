@@ -11,8 +11,11 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from app.cache.redis_task_list_cache import DATA_TTL_SECONDS, RedisTaskListCache
+from pydantic import ValidationError
+
+from app.cache.redis_task_list_cache import RedisTaskListCache
 from app.cache.task_list_snapshot import TaskListSnapshot
+from app.core.constants import TASK_LIST_CACHE_DATA_TTL_SECONDS
 from app.models.enums import TaskPriority, TaskStatus
 from app.models.task import Task
 from app.services.task_list_cache import task_list_query_digest
@@ -42,6 +45,24 @@ class TaskListCacheSerializationTests(unittest.TestCase):
         for payload in ("{", "[]", '{"items": [], "total": -1}', '{"items": [null], "total": 1}'):
             with self.subTest(payload=payload):
                 self.assertIsNone(TaskListSnapshot.from_json(payload))
+
+    def test_validation_error_hides_private_snapshot_input(self) -> None:
+        private_value = "PRIVATE_TASK_PAYLOAD_SENTINEL"
+        with self.assertRaises(ValidationError) as raised:
+            TaskListSnapshot.model_validate_json(
+                f'{{"items": [], "total": "{private_value}"}}'
+            )
+        self.assertNotIn(private_value, str(raised.exception))
+
+        task = Task(
+            project_id=uuid4(),
+            created_by=uuid4(),
+            title="private task",
+            due_date=private_value,
+        )
+        with self.assertRaises(ValidationError) as raised:
+            TaskListSnapshot.from_tasks([task], 1)
+        self.assertNotIn(private_value, str(raised.exception))
 
     def test_application_cache_port_has_no_redis_or_http_schema_dependency(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -149,7 +170,7 @@ class RedisTaskListCacheIntegrationTests(unittest.IsolatedAsyncioTestCase):
         key = self.cache._data_key(self.project_id, generation, "query")
         before_hit = await self.client.pttl(key)
         self.assertGreater(before_hit, 0)
-        self.assertLessEqual(before_hit, DATA_TTL_SECONDS * 1000)
+        self.assertLessEqual(before_hit, TASK_LIST_CACHE_DATA_TTL_SECONDS * 1000)
         first[0].title = "mutated"
         second, again_total = await self.cache.get(self.project_id, generation, "query")
         after_hit = await self.client.pttl(key)
@@ -190,7 +211,7 @@ class RedisTaskListCacheIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_redis_value_is_a_cache_miss(self) -> None:
         generation = await self.cache.generation(self.project_id)
         key = self.cache._data_key(self.project_id, generation, "bad")
-        await self.client.set(key, "not-json", ex=DATA_TTL_SECONDS)
+        await self.client.set(key, "not-json", ex=TASK_LIST_CACHE_DATA_TTL_SECONDS)
         self.assertIsNone(await self.cache.get(self.project_id, generation, "bad"))
-        await self.client.set(key, b"\xff", ex=DATA_TTL_SECONDS)
+        await self.client.set(key, b"\xff", ex=TASK_LIST_CACHE_DATA_TTL_SECONDS)
         self.assertIsNone(await self.cache.get(self.project_id, generation, "bad"))
