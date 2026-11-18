@@ -14,11 +14,15 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.auth import authentication_error_response
 from app.api.v1.router import api_router
 from app.api.v1.tasks import router as tasks_router
+from app.cache.redis_task_list_cache import RedisTaskListCache
 from app.core.config import Settings, get_settings
 from app.core.constants import (
     INTEGRITY_CONFLICT_MESSAGE,
@@ -112,7 +116,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.database_url, echo=settings.database_echo
         )
         app.state.session_factory = make_session_factory(app.state.engine)
+        redis_client = None
         try:
+            app.state.task_list_cache = None
+            if settings.redis_url:
+                redis_client = Redis.from_url(
+                    settings.redis_url,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                    retry=Retry(NoBackoff(), 0),
+                    max_connections=50,
+                )
+                app.state.task_list_cache = RedisTaskListCache(redis_client)
             await seed_default_data(app.state.session_factory)
             logger.info(
                 "TaskHub starting | env=%s version=%s docs=/docs",
@@ -121,7 +136,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             yield
         finally:
-            await app.state.engine.dispose()
+            try:
+                if redis_client is not None:
+                    await redis_client.aclose()
+            finally:
+                await app.state.engine.dispose()
             logger.info("TaskHub shutting down")
 
     app = FastAPI(
@@ -131,6 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.task_list_cache = None
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.frontend_origins,

@@ -37,8 +37,9 @@ def get_task_unit_of_work(
 
 def get_task_service(
     uow: Annotated[TaskManagementUnitOfWork, Depends(get_task_unit_of_work)],
+    request: Request,
 ) -> TaskService:
-    return TaskService(uow)
+    return TaskService(uow, getattr(request.app.state, "task_list_cache", None))
 
 
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]

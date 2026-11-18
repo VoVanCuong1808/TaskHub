@@ -27,6 +27,7 @@ class TaskStore(Protocol):
         status: TaskStatus | None,
         priority: TaskPriority | None,
         assignee_id: UUID | None,
+        q: str | None,
         offset: int,
         limit: int,
     ) -> tuple[list[Task], int]: ...

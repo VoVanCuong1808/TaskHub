@@ -41,6 +41,32 @@ class InMemoryRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((len(items), total), (1, 1))
         self.assertEqual(items[0].assignee_id, assignee_id)
 
+    async def test_literal_case_insensitive_search_matches_title_and_description(self) -> None:
+        repository = InMemoryTaskRepository()
+        project_id = uuid4()
+        for title, description in (
+            ("Deploy API", ""),
+            ("Vietnam task", "TÍCH HỢP thanh toán"),
+            ("100% ready", None),
+            ("unrelated", "underscore_name and slash\\path"),
+        ):
+            await repository.add(Task(title=title, description=description, project_id=project_id, created_by=uuid4()))
+
+        for q, expected in (
+            ("dEpLoY", 1),
+            ("tích hợp", 1),
+            ("100%", 1),
+            ("underscore_name", 1),
+            ("slash\\path", 1),
+            ("   ", 4),
+        ):
+            with self.subTest(q=q):
+                items, total = await repository.list(project_id=project_id, q=q.strip().lower() or None)
+                self.assertEqual(
+                    (len(items), total),
+                    (expected if q.strip() else 4, expected if q.strip() else 4),
+                )
+
     async def test_persistence_crud_has_no_authorization_or_transaction_logic(self) -> None:
         repository = InMemoryTaskRepository()
         project_id = uuid4()

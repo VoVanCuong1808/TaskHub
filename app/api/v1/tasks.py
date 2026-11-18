@@ -11,7 +11,7 @@ from app.api.pagination import PaginationDep
 from app.api.responses import error_responses
 from app.core.deps import CurrentUserDep, TaskServiceDep
 from app.models.enums import TaskPriority, TaskStatus
-from app.schemas.common import Page
+from app.schemas.common import Page, TrimmedText
 from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -39,7 +39,9 @@ async def create_task(
     summary="List tasks",
     description=(
         "Requires a Bearer access token and project_id for a workspace you can "
-        "access. Combine status, priority, and assignee_id filters with AND. "
+        "access. q is trimmed and searches title or description literally, "
+        "case-insensitively; combine it with status, priority, and assignee_id "
+        "filters using AND. "
         "Use one-based page with limit. Offset pagination is no longer supported."
     ),
 )
@@ -57,6 +59,10 @@ async def list_tasks(
     assignee_id: Annotated[
         UUID | None, Query(description="Filter by assigned user")
     ] = None,
+    q: Annotated[
+        TrimmedText | None,
+        Query(max_length=200, description="Literal title or description search"),
+    ] = None,
 ) -> Page[TaskRead]:
     tasks, total = await service.list(
         project_id=project_id,
@@ -64,6 +70,7 @@ async def list_tasks(
         status=task_status,
         priority=priority,
         assignee_id=assignee_id,
+        q=q,
         offset=pagination.effective_offset,
         limit=pagination.limit,
     )
