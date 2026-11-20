@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 import jwt
 from fastapi import HTTPException
-from pydantic import ValidationError
+from pydantic import RedisDsn, ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -22,6 +22,11 @@ from app.api.v1.auth import (
     require_trusted_origin,
 )
 from app.core.config import Settings
+from app.core.constants import (
+    REDIS_MAX_CONNECTIONS,
+    REDIS_RETRY_COUNT,
+    REDIS_SOCKET_TIMEOUT_SECONDS,
+)
 from app.core.exceptions import AuthenticationError
 from app.core.security import (
     create_token,
@@ -359,17 +364,84 @@ class AsyncPasswordTests(unittest.IsolatedAsyncioTestCase):
 class SettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_cookie_and_origin_configuration_validation(self) -> None:
         with self.assertRaisesRegex(ValidationError, "production requires Secure"):
-            Settings(environment="production", refresh_cookie_secure=False)
+            Settings(_env_file=None, redis_url=None, environment="production", refresh_cookie_secure=False)
         with self.assertRaisesRegex(ValidationError, "SameSite=None requires"):
-            Settings(refresh_cookie_secure=False, refresh_cookie_samesite="none")
+            Settings(_env_file=None, redis_url=None, refresh_cookie_secure=False, refresh_cookie_samesite="none")
         with self.assertRaisesRegex(ValidationError, "32 bytes"):
-            Settings(jwt_secret_key="short")
+            Settings(_env_file=None, redis_url=None, jwt_secret_key="short")
         for origins in (["*"], ["https://example.com/path"], ["ftp://example.com"]):
             with self.subTest(origins=origins), self.assertRaises(ValidationError):
-                Settings(frontend_origins=origins)
+                Settings(_env_file=None, redis_url=None, frontend_origins=origins)
+
+    async def test_redis_dsn_native_defaults_and_blank_disable(self) -> None:
+        self.assertIsNone(Settings(_env_file=None, redis_url="  ").redis_url)
+        configured = Settings(
+            _env_file=None,
+            redis_url="rediss://user:password@cache.example.test:6380/2",
+        ).redis_url
+        self.assertIsInstance(configured, RedisDsn)
+        self.assertEqual(str(configured), "rediss://user:password@cache.example.test:6380/2")
+        self.assertEqual(str(Settings(_env_file=None, redis_url="redis://").redis_url), "redis://localhost:6379/0")
+        self.assertEqual(
+            str(
+                Settings(
+                    _env_file=None,
+                    redis_url="redis://cache.example.test/0?socket_timeout=30",
+                ).redis_url
+            ),
+            "redis://cache.example.test:6379/0?socket_timeout=30",
+        )
+        unicode_host = Settings(
+            _env_file=None,
+            redis_url="redis://u:FAKEPW@h" + chr(0xFF0F) + ":6379/0",
+        ).redis_url
+        self.assertIsInstance(unicode_host, RedisDsn)
+
+        for url in (
+            "http://cache.example.test",
+            "redis://u:FAKEPW@h:bad",
+            "redis://u:FAKEPW@h:65536",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValidationError) as raised:
+                    Settings(_env_file=None, redis_url=url)
+                self.assertNotIn("FAKEPW", str(raised.exception))
+
+    async def test_redis_query_options_cannot_override_app_runtime_limits(self) -> None:
+        from redis.asyncio.retry import Retry
+
+        settings = Settings(
+            _env_file=None,
+            jwt_secret_key=SECRET,
+            redis_url=(
+                "redis://127.0.0.1:6379/0?socket_timeout=30"
+                "&socket_connect_timeout=25&max_connections=1&retry=99"
+            ),
+        )
+        self.assertIsInstance(settings.redis_url, RedisDsn)
+        engine = type("FakeEngine", (), {"dispose": AsyncMock()})()
+
+        async def seed_nothing(_session_factory) -> None:
+            return None
+
+        with (
+            patch("app.main.make_engine", return_value=engine),
+            patch("app.main.make_session_factory", return_value=object()),
+            patch("app.main.seed_default_data", new=seed_nothing),
+        ):
+            app = create_app(settings)
+            async with app.router.lifespan_context(app):
+                client = app.state.task_list_cache._client
+                options = client.connection_pool.connection_kwargs
+                self.assertEqual(options["socket_timeout"], REDIS_SOCKET_TIMEOUT_SECONDS)
+                self.assertEqual(options["socket_connect_timeout"], REDIS_SOCKET_TIMEOUT_SECONDS)
+                self.assertEqual(client.connection_pool.max_connections, REDIS_MAX_CONNECTIONS)
+                self.assertIsInstance(options["retry"], Retry)
+                self.assertEqual(options["retry"].get_retries(), REDIS_RETRY_COUNT)
+                self.assertTrue(client.auto_close_connection_pool)
 
     async def test_origin_guard_and_cors_are_exact_and_fail_closed(self) -> None:
-        settings = Settings(frontend_origins=["https://ui.example.test"])
+        settings = Settings(_env_file=None, redis_url=None, frontend_origins=["https://ui.example.test"])
 
         def request(origin: str | None):
             headers = [] if origin is None else [(b"origin", origin.encode())]
@@ -432,7 +504,7 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cookie_helpers_use_configured_path_and_attributes(self) -> None:
         response = Response()
-        settings = Settings(api_v1_prefix="/custom/v2", refresh_cookie_secure=False)
+        settings = Settings(_env_file=None, redis_url=None, api_v1_prefix="/custom/v2", refresh_cookie_secure=False)
         _set_refresh_cookie(response, "dummy", settings)
         header = response.headers["set-cookie"].lower()
         self.assertIn("path=/custom/v2/auth", header)
@@ -447,13 +519,13 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         secure_response = Response()
-        _set_refresh_cookie(secure_response, "dummy", Settings())
+        _set_refresh_cookie(secure_response, "dummy", Settings(_env_file=None, redis_url=None))
         self.assertIn("secure", secure_response.headers["set-cookie"].lower())
 
     async def test_short_or_missing_jwt_secret_fails_before_database_startup(
         self,
     ) -> None:
-        app = create_app(Settings(jwt_secret_key=None))
+        app = create_app(Settings(_env_file=None, redis_url=None, jwt_secret_key=None))
         with self.assertRaisesRegex(RuntimeError, "must be configured"):
             async with app.router.lifespan_context(app):
                 self.fail("startup should reject a missing signing key")

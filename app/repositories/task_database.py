@@ -2,8 +2,9 @@
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.constants import DEFAULT_PAGE_LIMIT
 from app.models.entities import (
@@ -63,6 +64,7 @@ class TaskRepository:
         status: TaskStatus | None = None,
         priority: TaskPriority | None = None,
         assignee_id: UUID | None = None,
+        q: str | None = None,
         offset: int = 0,
         limit: int = DEFAULT_PAGE_LIMIT,
     ) -> tuple[list[Task], int]:
@@ -73,17 +75,36 @@ class TaskRepository:
             predicates.append(TaskRow.priority == priority)
         if assignee_id is not None:
             predicates.append(TaskRow.assignee_id == assignee_id)
-        query = select(TaskRow).where(*predicates)
-        count_query = (
-            select(func.count()).select_from(TaskRow).where(*predicates)
+        if q:
+            predicates.append(
+                or_(
+                    func.lower(TaskRow.title).contains(q, autoescape=True),
+                    func.lower(TaskRow.description).contains(q, autoescape=True),
+                )
+            )
+        total = (
+            select(func.count().label("total"))
+            .select_from(TaskRow)
+            .where(*predicates)
+            .subquery()
         )
-        rows = await self._session.scalars(
-            query.order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
+        page = (
+            select(TaskRow)
+            .where(*predicates)
+            .order_by(TaskRow.created_at.desc(), TaskRow.id.desc())
             .offset(offset)
             .limit(limit)
+            .subquery()
         )
-        total = await self._session.scalar(count_query) or 0
-        return [self._domain(row) for row in rows], total
+        page_task = aliased(TaskRow, page)
+        result = await self._session.execute(
+            select(page_task, total.c.total).select_from(
+                total.outerjoin(page, true())
+            ).order_by(page_task.created_at.desc(), page_task.id.desc())
+        )
+        rows = result.all()
+        total_count = rows[0][1] if rows else 0
+        return [self._domain(row) for row, _ in rows if row is not None], total_count
 
     async def get(self, task_id: UUID) -> Task | None:
         row = await self._session.get(TaskRow, task_id)

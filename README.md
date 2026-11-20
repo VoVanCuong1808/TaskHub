@@ -12,17 +12,34 @@ Không cần activate virtualenv — mọi thứ chạy qua `uv`.
 
 ```powershell
 uv python install 3.12
+docker compose -f compose.local.yaml up -d --wait
 uv sync
-Copy-Item .env.example .env
-docker run -d --name taskhub-db -e POSTGRES_PASSWORD=taskhub -e POSTGRES_DB=taskhub -p 5432:5432 postgres:16
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+$script = @'
+from pathlib import Path
+import secrets
+
+path = Path(".env")
+lines = path.read_text(encoding="utf-8").splitlines()
+prefix = "TASKHUB_JWT_SECRET_KEY="
+for index, line in enumerate(lines):
+    if line.startswith(prefix):
+        if not line[len(prefix):]:
+            lines[index] = prefix + secrets.token_urlsafe(48)
+        break
+else:
+    lines.append(prefix + secrets.token_urlsafe(48))
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+'@
+$script | python -
 uv run alembic upgrade head
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Before starting the app, set a private signing key of at least 32 bytes and apply database migrations with `uv run alembic upgrade head`:
-
-```powershell
-$env:TASKHUB_JWT_SECRET_KEY = (python -c "import secrets; print(secrets.token_urlsafe(48))")
-```
+The local dependency stack is only PostgreSQL and Redis; the app runs on the host.
+The setup preserves an existing `.env` and existing signing key. If the key is
+blank or missing, it writes a private random key directly to `.env` without
+printing it.
 
 `uv run alembic downgrade base` removes all tables; use it only for a disposable DB.
 
@@ -125,7 +142,7 @@ không nhận refresh token trong JSON hoặc Authorization header.
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
 | POST   | `/api/v1/tasks`       | 201    | Tạo task trong `project_id`   |
-| GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`status`, `priority`, `assignee_id`, `page`, `limit`) |
+| GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`q`, `status`, `priority`, `assignee_id`, `page`, `limit`) |
 | GET    | `/api/v1/tasks/{id}`  | 200/404| Chi tiết                      |
 | PATCH  | `/api/v1/tasks/{id}`  | 200/404| Cập nhật một phần             |
 | DELETE | `/api/v1/tasks/{id}`  | 204/404| Xoá                           |
@@ -141,14 +158,17 @@ Task create/update/read hỗ trợ thêm `priority` (`low`, `medium`, `high`,
 `urgent`), `due_date` ISO 8601 có timezone, `assignee_id`; response có thêm
 `created_by`. Assignee phải là owner hoặc user đang hoạt động có membership
 trong workspace. `due_date` được chuẩn hoá UTC. Task list yêu cầu `project_id`
-và hỗ trợ các filter kết hợp AND `status`, `priority`, `assignee_id`. Assignee
-filter chỉ so khớp UUID trên project hiện tại; UUID không tồn tại hoặc nằm
-ngoài project trả về danh sách rỗng mà không kiểm tra user. Không có filter
-due date, label hoặc text search.
+và hỗ trợ `q` cùng các filter kết hợp AND `status`, `priority`, `assignee_id`.
+`q` được trim, tối đa 200 ký tự, không nhận NUL; chuỗi rỗng sau trim bỏ qua tìm
+kiếm. Tìm literal, không phân biệt hoa thường trong title hoặc description;
+`%`, `_` và `\` không phải wildcard. Unicode tuân theo lower/collation của
+PostgreSQL, không có accent folding. Assignee filter chỉ so khớp UUID trên
+project hiện tại; UUID không tồn tại hoặc nằm ngoài project trả về danh sách
+rỗng mà không kiểm tra user. Không có filter due date hoặc label.
 
 Pagination dùng `page` bắt đầu từ 1 và `limit` mặc định 20 (1–200). Tham số
-query `offset` đã bị loại bỏ và trả 422. Alias ẩn `/tasks` dùng cùng các filter
-và pagination.
+query `offset` đã bị loại bỏ và trả 422. Alias ẩn `/tasks` dùng cùng `q`, các
+filter và pagination.
 
 Label thuộc cố định một project và chỉ gắn được vào task cùng project. Label và
 comment dùng response phân trang `{items,total}`. OWNER/EDITOR được ghi;
@@ -181,6 +201,10 @@ $assigneeId = "<UUID thành viên trong workspace>"
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId&status=todo&priority=high&assignee_id=$assigneeId&page=2&limit=20" `
   -Headers $headers
 
+# Search không phân biệt hoa thường, kết hợp AND với các filter
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId&q=release&status=todo&page=1&limit=20" `
+  -Headers $headers
+
 Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" `
   -Headers $headers -ContentType "application/json" -Body (@{ status = "done" } | ConvertTo-Json)
 
@@ -202,9 +226,10 @@ Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/api/v1/tasks/$($tas
 
 ## Cấu hình
 
-Mọi biến môi trường dùng tiền tố `TASKHUB_`:
+Mọi biến môi trường dùng tiền tố `TASKHUB_`; các giá trị local mẫu nằm trong
+`.env.example`:
 
-| Biến                   | Mặc định    |
+| Biến                   | Giá trị mẫu |
 | ---------------------- | ----------- |
 | `TASKHUB_APP_NAME`     | `TaskHub`   |
 | `TASKHUB_VERSION`      | `0.1.0`     |
@@ -213,8 +238,9 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`:
 | `TASKHUB_API_V1_PREFIX`| `/api/v1`   |
 | `TASKHUB_HOST`         | `127.0.0.1` |
 | `TASKHUB_PORT`         | `8000`      |
-| `TASKHUB_DATABASE_URL` | `postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub` |
+| `TASKHUB_DATABASE_URL` | `postgresql+asyncpg://postgres:taskhub@127.0.0.1:5433/taskhub` |
 | `TASKHUB_DATABASE_ECHO` | `false` |
+| `TASKHUB_REDIS_URL` | `redis://127.0.0.1:6379/0` |
 | `TASKHUB_JWT_SECRET_KEY` | bắt buộc, tối thiểu 32 bytes |
 | `TASKHUB_ACCESS_TOKEN_MINUTES` | `15` |
 | `TASKHUB_REFRESH_TOKEN_DAYS` | `30` |
@@ -224,17 +250,50 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`:
 
 ## Kiểm thử database
 
-Integration tests chỉ chạy trên PostgreSQL database riêng tên `taskhub_test`.
-Tạo database test rồi chạy:
+Integration tests use coordinator-managed disposable test services, separate
+from the persistent local application services in `compose.local.yaml`:
+PostgreSQL container `taskhub-day5-db` exposes only `taskhub_test` on port 5432,
+and Redis container `taskhub-day6-redis` is exposed on port 6380. Do not create a
+test database in the local application PostgreSQL container. Run the suite with:
 
 ```powershell
-docker exec taskhub-db createdb -U postgres taskhub_test
-$env:TASKHUB_TEST_DATABASE_URL = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub_test"
+$env:TASKHUB_TEST_DATABASE_URL = "postgresql+asyncpg://postgres:taskhub@127.0.0.1:5432/taskhub_test"
+$env:TASKHUB_TEST_REDIS_URL = "redis://127.0.0.1:6380/0"
 uv run python -m unittest discover -s tests -v
 ```
 
 Test migration chạy `downgrade base` rồi `upgrade head`; sau test sẽ downgrade về `base`.
 Không đặt `TASKHUB_TEST_DATABASE_URL` trỏ vào database ứng dụng.
+
+### Cache task list
+
+Đặt `TASKHUB_REDIS_URL=redis://localhost:6379/0` để bật Redis cache; URI
+`redis://` và `rediss://` được hỗ trợ theo `RedisDsn` của Pydantic, gồm các mặc
+định native như host `localhost` và database `/0`; có thể kèm credentials,
+database index và query options. Runtime luôn ghi đè timeout, retry và giới hạn
+pool bằng cấu hình ứng dụng. URI không hợp lệ làm settings validation thất bại
+ngay khi khởi động. Bỏ trống để tắt. Cache lưu
+snapshot JSON của task list trong 60 giây. Mỗi request vẫn đọc
+database để xác thực và kiểm tra quyền project trước khi tra cache. Sau khi task
+được tạo, sửa hoặc xóa và transaction commit thành công, service đổi generation
+token của project; mọi filter và trang cũ trở nên không thể truy cập cùng lúc.
+Lua compare-and-set ngăn một lần đọc bắt đầu trước invalidation ghi dữ liệu cũ
+vào generation mới. Label/comment không làm đổi danh sách task nên không cần
+invalidation.
+
+Khi Redis lỗi, list đọc database và mutation đã commit vẫn thành công; cache
+lookup/fill bị bỏ qua. Nếu rotation lỗi, snapshot cũ có thể được phục vụ cho tới
+khi TTL 60 giây tính từ lần fill snapshot đó hết hạn. Một lần đọc đã chạy đồng
+thời với mutation vẫn có thể fill snapshot sau commit nếu rotation thất bại;
+vì vậy giới hạn 60 giây tính từ thời điểm fill, không phải từ thời điểm commit.
+Cache không chứa quyền hoặc kết quả authorization. Redis client có socket/connect
+timeout 0.5 giây, không retry command và được đóng khi app shutdown.
+
+Để chạy kiểm thử Redis, đặt `TASKHUB_TEST_REDIS_URL` trỏ tới Redis riêng cho
+test, ví dụ `redis://127.0.0.1:6380/0`, rồi chạy unittest. Bài test dùng namespace
+ngẫu nhiên và chỉ xóa key thuộc namespace đó; không dùng `FLUSHDB`/`FLUSHALL`.
+Kiểm thử kết hợp PostgreSQL/Redis cần đồng thời `TASKHUB_TEST_DATABASE_URL`
+trỏ tới database disposable `taskhub_test` và `TASKHUB_TEST_REDIS_URL`.
 
 ## Cấu trúc
 
@@ -252,11 +311,12 @@ taskhub/
 │   │   ├── constants.py         # shared validation and error constants
 │   │   ├── exceptions.py        # application/domain exceptions
 │   │   └── security.py          # password hashing and JWT validation
+│   ├── cache/                   # Redis adapters and validated cache snapshots
 │   ├── db/                      # engine, metadata, seed, legacy utility
 │   ├── models/                  # entities, enums, and task domain model
 │   ├── repositories/            # PostgreSQL task and user persistence
 │   ├── schemas/                 # Pydantic request, response, and shared types
-│   ├── services/                # task and auth business rules
+│   ├── services/                # task/auth rules and cache ports
 │   └── main.py                  # app factory, middleware, exception handlers
 ├── alembic/versions/            # schema migrations
 ├── examples/                    # browser auth client and flow test

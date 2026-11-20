@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,13 +14,14 @@ from uuid import UUID, uuid4
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import RedisDsn, SecretStr
 from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
+from app.cache.redis_task_list_cache import RedisTaskListCache
 from app.core.config import Settings
 from app.core.constants import AUTH_INACTIVE_ACCOUNT_MESSAGE
 from app.core.exceptions import (
@@ -27,6 +29,7 @@ from app.core.exceptions import (
     InvalidAssigneeError,
     PermissionDeniedError,
     ProjectArchivedError,
+    ProjectNotFoundError,
     TaskNotFoundError,
 )
 from app.core.security import create_token, decode_token, hash_password_async
@@ -72,6 +75,47 @@ from app.services.workspace_service import WorkspaceService
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_DATABASE_ENV = "TASKHUB_TEST_DATABASE_URL"
+
+
+def isolated_test_settings(database_url: str, jwt_secret: str) -> Settings:
+    """Settings for database tests that never inherit the app's local .env."""
+    return Settings(
+        _env_file=None,
+        redis_url=None,
+        database_url=database_url,
+        jwt_secret_key=SecretStr(jwt_secret),
+        refresh_cookie_secure=False,
+    )
+
+
+class SettingsIsolationTests(unittest.TestCase):
+    def test_postgres_settings_helper_ignores_local_app_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dotenv = Path(directory) / ".env"
+            dotenv.write_text(
+                "TASKHUB_REDIS_URL=redis://127.0.0.1:6379/0\n"
+                "TASKHUB_JWT_SECRET_KEY=local-app-signing-secret-at-least-32-bytes\n"
+                "TASKHUB_REFRESH_COOKIE_SECURE=true\n"
+                "TASKHUB_ACCESS_TOKEN_MINUTES=99\n",
+                encoding="utf-8",
+            )
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(directory)
+                settings = isolated_test_settings(
+                    "postgresql+asyncpg://test.invalid/taskhub_test",
+                    "isolated-test-signing-secret-at-least-32-bytes",
+                )
+            finally:
+                os.chdir(previous_directory)
+
+        self.assertIsNone(settings.redis_url)
+        self.assertEqual(
+            settings.jwt_secret_key.get_secret_value(),
+            "isolated-test-signing-secret-at-least-32-bytes",
+        )
+        self.assertFalse(settings.refresh_cookie_secure)
+        self.assertEqual(settings.access_token_minutes, 15)
 
 
 def request_for(method: str) -> Request:
@@ -327,10 +371,9 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         return {"Authorization": f"Bearer {token}"}
 
     def _task_auth_settings(self) -> Settings:
-        return Settings(
-            database_url=self.test_url,
-            jwt_secret_key=SecretStr("day4-test-signing-secret-at-least-32-bytes"),
-            refresh_cookie_secure=False,
+        return isolated_test_settings(
+            self.test_url,
+            "day4-test-signing-secret-at-least-32-bytes",
         )
 
     async def test_task_authentication_rejects_missing_invalid_expired_refresh_and_inactive(self) -> None:
@@ -457,6 +500,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             existing.status = TaskStatus.TODO
             existing.priority = TaskPriority.HIGH
             existing.assignee_id = data.viewer.id
+            existing.description = "Tiếng Việt Tích Hợp 100%_\\docs"
             existing.created_at = created_at
             existing.updated_at = created_at
             second = TaskRow(
@@ -507,6 +551,16 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             combined = listing(
                 status="todo", priority="high", assignee_id=str(data.viewer.id)
             )
+            searched = listing(q="  tíCH hợp  ")
+            literal_wildcards = listing(q="100%_\\docs")
+            search_and_filter = listing(q="tích hợp", status="done")
+            combined_search = listing(
+                q="tích hợp",
+                status="todo",
+                priority="high",
+                assignee_id=str(data.viewer.id),
+            )
+            search_out_of_range = listing(q="tích hợp", page=2, limit=1)
             combined_limited = listing(
                 status="todo",
                 priority="high",
@@ -517,6 +571,15 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(priority_page.json()["total"], 2)
             self.assertEqual(assignee_page.json()["total"], 2)
             self.assertEqual(combined.json()["total"], 2)
+            self.assertEqual(searched.json()["total"], 1)
+            self.assertEqual(searched.json()["items"][0]["id"], str(data.existing.id))
+            self.assertEqual(literal_wildcards.json()["total"], 1)
+            self.assertEqual(search_and_filter.json()["total"], 0)
+            self.assertEqual(combined_search.json()["total"], 1)
+            self.assertEqual(
+                combined_search.json()["items"][0]["id"], str(data.existing.id)
+            )
+            self.assertEqual(search_out_of_range.json(), {"items": [], "total": 1})
             self.assertEqual(combined_limited.json()["total"], 2)
             self.assertEqual(len(combined_limited.json()["items"]), 1)
             matching_ids = sorted([str(data.existing.id), str(second.id)], reverse=True)
@@ -587,6 +650,267 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 headers=self._task_auth_headers(data.viewer, data.secret),
             )
             self.assertEqual(viewer.status_code, 200)
+
+    @unittest.skipUnless(
+        os.getenv("TASKHUB_TEST_REDIS_URL"),
+        "set TASKHUB_TEST_REDIS_URL to run PostgreSQL plus Redis integration",
+    )
+    async def test_postgres_task_list_cache_authorization_and_post_commit_invalidation(self) -> None:
+        from redis.asyncio import Redis
+
+        data = await self._make_task_auth_fixture()
+        namespace = f"taskhub:test:{uuid4()}:task-list:v1"
+        client = Redis.from_url(
+            os.environ["TASKHUB_TEST_REDIS_URL"],
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            max_connections=4,
+        )
+        cache = RedisTaskListCache(client, namespace=namespace)
+        try:
+            async def list_tasks(user_id: UUID, q: str, *, expect_hit: bool = False):
+                async with self.session_factory() as session:
+                    uow = SQLAlchemyTaskManagementUnitOfWork(session)
+                    if expect_hit:
+                        async def database_list_must_not_run(**kwargs):
+                            raise AssertionError("expected a Redis cache hit")
+
+                        uow.tasks.list = database_list_must_not_run
+                    return await TaskService(uow, cache).list(
+                        project_id=data.project.id, user_id=user_id, q=q
+                    )
+
+            async with self.session_factory() as session:
+                service = TaskService(SQLAlchemyTaskManagementUnitOfWork(session), cache)
+                empty, total = await service.list(
+                    project_id=data.project.id, user_id=data.viewer.id, q="new-task"
+                )
+                self.assertEqual((empty, total), ([], 0))
+
+            async with self.session_factory() as session:
+                created = await TaskService(
+                    SQLAlchemyTaskManagementUnitOfWork(session), cache
+                ).create(
+                    project_id=data.project.id,
+                    user_id=data.owner.id,
+                    title="new-task",
+                )
+            created_list, created_total = await list_tasks(data.viewer.id, "new-task")
+            self.assertEqual((len(created_list), created_total), (1, 1))
+            warm_create, warm_create_total = await list_tasks(
+                data.owner.id, " NEW-TASK ", expect_hit=True
+            )
+            self.assertEqual((len(warm_create), warm_create_total), (1, 1))
+
+            async with self.session_factory() as session:
+                service = TaskService(SQLAlchemyTaskManagementUnitOfWork(session), cache)
+                with self.assertRaises(ProjectNotFoundError):
+                    await service.list(
+                        project_id=data.project.id,
+                        user_id=data.outsider.id,
+                        q="new-task",
+                    )
+                await service.update(created.id, {"title": "renamed"}, data.owner.id)
+
+            async with self.session_factory() as session:
+                service = TaskService(SQLAlchemyTaskManagementUnitOfWork(session), cache)
+                old_query, old_total = await service.list(
+                    project_id=data.project.id, user_id=data.viewer.id, q="new-task"
+                )
+                new_query, new_total = await service.list(
+                    project_id=data.project.id, user_id=data.viewer.id, q="renamed"
+                )
+                self.assertEqual((old_query, old_total), ([], 0))
+                self.assertEqual((len(new_query), new_total), (1, 1))
+
+            warm_update, warm_update_total = await list_tasks(
+                data.viewer.id, "renamed", expect_hit=True
+            )
+            self.assertEqual((len(warm_update), warm_update_total), (1, 1))
+            async with self.session_factory() as session:
+                await TaskService(
+                    SQLAlchemyTaskManagementUnitOfWork(session), cache
+                ).delete(created.id, data.owner.id)
+            deleted, deleted_total = await list_tasks(data.viewer.id, "renamed")
+            self.assertEqual((deleted, deleted_total), ([], 0))
+        finally:
+            async for key in client.scan_iter(match=f"{namespace}:*"):
+                await client.delete(key)
+            await client.aclose()
+
+    @unittest.skipUnless(
+        os.getenv(TEST_DATABASE_ENV) and os.getenv("TASKHUB_TEST_REDIS_URL"),
+        "requires disposable PostgreSQL and TASKHUB_TEST_REDIS_URL",
+    )
+    async def test_http_lifespan_wires_real_redis_cache_and_patch_invalidates(self) -> None:
+        from redis.asyncio import Redis
+        from redis.asyncio.retry import Retry
+        from redis.backoff import NoBackoff
+
+        data = await self._make_task_auth_fixture()
+        redis_url = os.environ["TASKHUB_TEST_REDIS_URL"]
+        cleanup = Redis.from_url(
+            redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            retry=Retry(NoBackoff(), 0),
+        )
+        settings = self._task_auth_settings().model_copy(
+            update={"redis_url": RedisDsn(redis_url)}
+        )
+        self.assertIsInstance(settings.redis_url, RedisDsn)
+        project_keys = f"taskhub:task-list:v1:project:{data.project.id}:*"
+        try:
+            with TestClient(create_app(settings)) as client:
+                headers = self._task_auth_headers(data.owner, data.secret)
+                params = {"project_id": str(data.project.id)}
+                first = client.get("/api/v1/tasks", params=params, headers=headers)
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(first.json()["items"][0]["title"], "Existing")
+
+                async def database_list_must_not_run(*args, **kwargs):
+                    raise AssertionError("expected the app-wired Redis cache hit")
+
+                from unittest.mock import patch
+
+                with patch.object(TaskRepository, "list", database_list_must_not_run):
+                    hit = client.get("/api/v1/tasks", params=params, headers=headers)
+                self.assertEqual(hit.status_code, 200, hit.text)
+                self.assertEqual(hit.json(), first.json())
+
+                updated = client.patch(
+                    f"/api/v1/tasks/{data.existing.id}",
+                    headers=headers,
+                    json={"title": "HTTP cache invalidated"},
+                )
+                self.assertEqual(updated.status_code, 200, updated.text)
+                after_patch = client.get(
+                    "/api/v1/tasks", params=params, headers=headers
+                )
+                self.assertEqual(after_patch.status_code, 200, after_patch.text)
+                self.assertEqual(
+                    after_patch.json()["items"][0]["title"], "HTTP cache invalidated"
+                )
+        finally:
+            async for key in cleanup.scan_iter(match=project_keys):
+                await cleanup.delete(key)
+            await cleanup.aclose()
+
+    async def test_task_list_page_and_total_share_snapshot_during_concurrent_delete(self) -> None:
+        data = await self._make_task_auth_fixture()
+        tied_at = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+        later_at = datetime(2026, 2, 1, 12, 1, tzinfo=UTC)
+        async with self.session_factory() as session:
+            existing = await session.get(TaskRow, data.existing.id)
+            existing.title = "Coherent existing"
+            existing.description = "coherent match"
+            existing.status = TaskStatus.TODO
+            existing.priority = TaskPriority.HIGH
+            existing.assignee_id = data.viewer.id
+            existing.created_at = tied_at
+            existing.updated_at = tied_at
+            deleted = TaskRow(
+                project_id=data.project.id,
+                title="Coherent deleted",
+                description="coherent match",
+                status=TaskStatus.TODO,
+                priority=TaskPriority.HIGH,
+                assignee_id=data.viewer.id,
+                created_by=data.owner.id,
+                created_at=tied_at,
+                updated_at=tied_at,
+            )
+            done = TaskRow(
+                project_id=data.project.id,
+                title="Coherent done",
+                description="coherent match",
+                status=TaskStatus.DONE,
+                priority=TaskPriority.HIGH,
+                assignee_id=data.viewer.id,
+                created_by=data.owner.id,
+                created_at=later_at,
+                updated_at=later_at,
+            )
+            session.add_all([deleted, done])
+            await session.commit()
+
+        filters = {
+            "project_id": data.project.id,
+            "status": TaskStatus.TODO,
+            "priority": TaskPriority.HIGH,
+            "assignee_id": data.viewer.id,
+            "q": "coherent",
+        }
+        expected_tie_order = sorted([data.existing.id, deleted.id], reverse=True)
+        async with self.session_factory() as session:
+            repository = TaskRepository(session)
+            first, first_total = await repository.list(**filters, offset=0, limit=1)
+            second, second_total = await repository.list(**filters, offset=1, limit=1)
+            self.assertEqual(
+                ([first[0].id, second[0].id], first_total, second_total),
+                (expected_tie_order, 2, 2),
+            )
+
+        writer_committed = False
+        async with self.session_factory() as reader:
+            original_execute = reader.execute
+
+            async def execute_then_delete(statement, *args, **kwargs):
+                nonlocal writer_committed
+                result = await original_execute(statement, *args, **kwargs)
+                if not writer_committed:
+                    async with self.session_factory() as writer:
+                        doomed = await writer.get(TaskRow, deleted.id)
+                        await writer.delete(doomed)
+                        await writer.commit()
+                    writer_committed = True
+                return result
+
+            reader.execute = execute_then_delete
+            items, total = await TaskRepository(reader).list(
+                **filters, offset=0, limit=20
+            )
+            self.assertTrue(writer_committed)
+            self.assertEqual(
+                ([item.id for item in items], total),
+                (expected_tie_order, 2),
+            )
+
+        async with self.session_factory() as session:
+            self.assertIsNone(await session.get(TaskRow, deleted.id))
+            items, total = await TaskRepository(session).list(
+                **filters, offset=100, limit=10
+            )
+            self.assertEqual((items, total), ([], 1))
+
+            existing = await session.get(TaskRow, data.existing.id)
+            existing.status = TaskStatus.DONE
+            await session.commit()
+
+            todo, todo_total = await TaskRepository(session).list(
+                **filters, offset=0, limit=10
+            )
+            todo_out_of_range, todo_out_of_range_total = await TaskRepository(
+                session
+            ).list(**filters, offset=100, limit=10)
+            self.assertEqual((todo, todo_total), ([], 0))
+            self.assertEqual((todo_out_of_range, todo_out_of_range_total), ([], 0))
+
+            done_filters = {**filters, "status": TaskStatus.DONE}
+            done_page, done_total = await TaskRepository(session).list(
+                **done_filters, offset=0, limit=1
+            )
+            done_second, done_second_total = await TaskRepository(session).list(
+                **done_filters, offset=1, limit=1
+            )
+            done_out_of_range, done_out_of_range_total = await TaskRepository(
+                session
+            ).list(**done_filters, offset=2, limit=1)
+            self.assertEqual(
+                ([done_page[0].id, done_second[0].id], done_total, done_second_total),
+                ([done.id, data.existing.id], 2, 2),
+            )
+            self.assertEqual((done_out_of_range, done_out_of_range_total), ([], 2))
 
     async def test_day5_assignment_labels_and_comments_api_contract(self) -> None:
         data = await self._make_task_auth_fixture()
@@ -1470,11 +1794,7 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _workspace_settings(self, secret: str) -> Settings:
-        return Settings(
-            database_url=self.test_url,
-            jwt_secret_key=SecretStr(secret),
-            refresh_cookie_secure=False,
-        )
+        return isolated_test_settings(self.test_url, secret)
 
     @staticmethod
     def _workspace_headers(user: User, secret: str) -> dict[str, str]:
@@ -1824,10 +2144,8 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_task.title, "write completed before revocation")
         self.assertIsNone(membership)
     async def test_auth_profile_password_rotation_and_persistence(self) -> None:
-        settings = Settings(
-            database_url=self.test_url,
-            jwt_secret_key=SecretStr("day3-test-signing-secret-at-least-32-bytes"),
-            refresh_cookie_secure=False,
+        settings = isolated_test_settings(
+            self.test_url, "day3-test-signing-secret-at-least-32-bytes"
         )
         app = create_app(settings)
         email = f"{uuid4().hex}@example.com"
@@ -2132,10 +2450,8 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_refresh_replay_commits_user_session_revocation(self) -> None:
-        settings = Settings(
-            database_url=self.test_url,
-            jwt_secret_key=SecretStr("day3-test-signing-secret-at-least-32-bytes"),
-            refresh_cookie_secure=False,
+        settings = isolated_test_settings(
+            self.test_url, "day3-test-signing-secret-at-least-32-bytes"
         )
         email = f"{uuid4().hex}@example.com"
         async with self.session_factory() as session:

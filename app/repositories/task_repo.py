@@ -29,6 +29,7 @@ class InMemoryTaskRepository:
         status: TaskStatus | None = None,
         priority: TaskPriority | None = None,
         assignee_id: UUID | None = None,
+        q: str | None = None,
         offset: int = 0,
         limit: int = DEFAULT_PAGE_LIMIT,
     ) -> tuple[list[Task], int]:
@@ -42,6 +43,13 @@ class InMemoryTaskRepository:
             items = [task for task in items if task.priority == priority]
         if assignee_id is not None:
             items = [task for task in items if task.assignee_id == assignee_id]
+        if q:
+            items = [
+                task
+                for task in items
+                if q in task.title.lower()
+                or (task.description is not None and q in task.description.lower())
+            ]
         items.sort(key=lambda task: (task.created_at, task.id), reverse=True)
         return items[offset : offset + limit], len(items)
 

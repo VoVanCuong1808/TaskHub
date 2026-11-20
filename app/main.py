@@ -14,11 +14,16 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from redis.asyncio import Redis
+from redis.asyncio.connection import ConnectionPool, parse_url
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.auth import authentication_error_response
 from app.api.v1.router import api_router
 from app.api.v1.tasks import router as tasks_router
+from app.cache.redis_task_list_cache import RedisTaskListCache
 from app.core.config import Settings, get_settings
 from app.core.constants import (
     INTEGRITY_CONFLICT_MESSAGE,
@@ -26,6 +31,9 @@ from app.core.constants import (
     INTEGRITY_REFERENCE_MESSAGE,
     INTEGRITY_REQUIRED_MESSAGE,
     INTEGRITY_RESTRICTED_MESSAGE,
+    REDIS_MAX_CONNECTIONS,
+    REDIS_RETRY_COUNT,
+    REDIS_SOCKET_TIMEOUT_SECONDS,
 )
 from app.core.exceptions import (
     ApplicationError,
@@ -112,7 +120,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.database_url, echo=settings.database_echo
         )
         app.state.session_factory = make_session_factory(app.state.engine)
+        redis_client = None
         try:
+            app.state.task_list_cache = None
+            if settings.redis_url:
+                connection_options = parse_url(str(settings.redis_url))
+                connection_options.update(
+                    socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+                    socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+                    retry=Retry(NoBackoff(), REDIS_RETRY_COUNT),
+                    max_connections=REDIS_MAX_CONNECTIONS,
+                )
+                redis_client = Redis.from_pool(ConnectionPool(**connection_options))
+                app.state.task_list_cache = RedisTaskListCache(redis_client)
             await seed_default_data(app.state.session_factory)
             logger.info(
                 "TaskHub starting | env=%s version=%s docs=/docs",
@@ -121,7 +141,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             yield
         finally:
-            await app.state.engine.dispose()
+            try:
+                if redis_client is not None:
+                    await redis_client.aclose()
+            finally:
+                await app.state.engine.dispose()
             logger.info("TaskHub shutting down")
 
     app = FastAPI(
@@ -131,6 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.task_list_cache = None
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.frontend_origins,

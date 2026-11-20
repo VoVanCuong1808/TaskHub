@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
 import subprocess
 import sys
 import unittest
@@ -24,6 +26,7 @@ from app.core.exceptions import (
     LabelProjectMismatchError,
     PermissionDeniedError,
     ProjectArchivedError,
+    ProjectNotFoundError,
     TaskLabelNotFoundError,
     TaskNotFoundError,
 )
@@ -75,6 +78,7 @@ class FakeTaskStore:
         status: TaskStatus | None,
         priority: TaskPriority | None,
         assignee_id: UUID | None,
+        q: str | None,
         offset: int,
         limit: int,
     ) -> tuple[list[Task], int]:
@@ -86,6 +90,13 @@ class FakeTaskStore:
             items = [task for task in items if task.priority is priority]
         if assignee_id is not None:
             items = [task for task in items if task.assignee_id == assignee_id]
+        if q:
+            items = [
+                task
+                for task in items
+                if q in task.title.lower()
+                or (task.description is not None and q in task.description.lower())
+            ]
         return items[offset : offset + limit], len(items)
 
     async def get(self, task_id: UUID) -> Task | None:
@@ -285,10 +296,13 @@ class FakeTaskUnitOfWork:
         self.comments = FakeCommentStore(self.events)
         self.commit_count = 0
         self.rollback_count = 0
+        self.commit_error: Exception | None = None
 
     async def commit(self) -> None:
         self.events.append("commit")
         self.commit_count += 1
+        if self.commit_error:
+            raise self.commit_error
 
     async def rollback(self) -> None:
         self.events.append("rollback")
@@ -510,6 +524,266 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.list(project_id=self.project.id, user_id=self.owner.id)
         self.assertEqual(self.uow.commit_count, 1)
         self.assertNotIn("commit", self.uow.events)
+
+    async def test_task_list_normalizes_search_and_combines_filters(self) -> None:
+        matching = await self._create()
+        matching.title = "Tích Hợp PAYMENTS"
+        matching.description = "Release candidate"
+        matching.status = TaskStatus.DONE
+        other = await self._create()
+        other.title = "Tích Hợp PAYMENTS"
+        other.status = TaskStatus.TODO
+
+        items, total = await self.service.list(
+            project_id=self.project.id,
+            user_id=self.owner.id,
+            status=TaskStatus.DONE,
+            q="  tíCH hợp  ",
+        )
+        self.assertEqual((items, total), ([matching], 1))
+
+        items, total = await self.service.list(
+            project_id=self.project.id, user_id=self.owner.id, q="   "
+        )
+        self.assertEqual(total, 2)
+        self.assertIn(other, items)
+
+    async def test_task_list_cache_authorizes_first_and_returns_fresh_snapshot(self) -> None:
+        class Cache:
+            def __init__(self, events: list[str]) -> None:
+                self.events = events
+                self.value = None
+
+            async def generation(self, project_id):
+                self.events.append("cache_generation")
+                return "generation-1"
+
+            async def get(self, project_id, generation, query_digest):
+                self.events.append("cache_get")
+                return self.value
+
+            async def set_if_current(self, project_id, generation, query_digest, items, total):
+                self.events.append("cache_set")
+                self.value = ([copy(item) for item in items], total)
+                return True
+
+            async def rotate(self, project_id):
+                self.events.append("cache_rotate")
+
+        cache = Cache(self.uow.events)
+        service = TaskService(self.uow, cache)
+        created = await self._create()
+        self.uow.events.clear()
+        first, _ = await service.list(project_id=self.project.id, user_id=self.viewer.id)
+        self.assertLess(self.uow.events.index("get_project"), self.uow.events.index("cache_get"))
+        self.assertIn("list_tasks", self.uow.events)
+        self.assertIn("cache_set", self.uow.events)
+
+        self.uow.events.clear()
+        second, _ = await service.list(project_id=self.project.id, user_id=self.owner.id)
+        self.assertIn("cache_get", self.uow.events)
+        self.assertNotIn("list_tasks", self.uow.events)
+        self.assertEqual(first[0].id, second[0].id)
+        second[0].title = "mutated cache result"
+        self.assertEqual(first[0].title, created.title)
+
+        self.uow.events.clear()
+        with self.assertRaises(ProjectNotFoundError):
+            await service.list(project_id=self.project.id, user_id=self.outsider.id)
+        self.assertNotIn("cache_get", self.uow.events)
+
+        self.uow.events.clear()
+        self.uow.workspaces.members.pop((self.workspace.id, self.viewer.id))
+        with self.assertRaises(ProjectNotFoundError):
+            await service.list(project_id=self.project.id, user_id=self.viewer.id)
+        self.assertNotIn("cache_get", self.uow.events)
+
+        self.uow.events.clear()
+        self.uow.workspaces.items.pop(self.workspace.id)
+        with self.assertRaises(ProjectNotFoundError):
+            await service.list(project_id=self.project.id, user_id=self.owner.id)
+        self.assertNotIn("cache_get", self.uow.events)
+
+    async def test_in_flight_database_read_cannot_fill_new_generation(self) -> None:
+        task = await self._create()
+        entered_list = asyncio.Event()
+        finish_list = asyncio.Event()
+        cache_generation = {"value": "before"}
+
+        class Cache:
+            def __init__(self) -> None:
+                self.fills: list[str] = []
+
+            async def generation(self, project_id):
+                return cache_generation["value"]
+
+            async def get(self, project_id, generation, query_digest):
+                return None
+
+            async def set_if_current(self, project_id, generation, query_digest, items, total):
+                if generation != cache_generation["value"]:
+                    return False
+                self.fills.extend(item.title for item in items)
+                return True
+
+            async def rotate(self, project_id):
+                cache_generation["value"] = "after"
+
+        cache = Cache()
+        service = TaskService(self.uow, cache)
+        original_list = self.uow.tasks.list
+        first_read = True
+
+        async def paused_list(**kwargs):
+            nonlocal first_read
+            items, total = await original_list(**kwargs)
+            snapshot = [copy(item) for item in items]
+            if first_read:
+                first_read = False
+                entered_list.set()
+                await finish_list.wait()
+            return snapshot, total
+
+        self.uow.tasks.list = paused_list
+        read = asyncio.create_task(
+            service.list(project_id=self.project.id, user_id=self.owner.id)
+        )
+        await entered_list.wait()
+        await service.update(task.id, {"title": "new title"}, self.owner.id)
+        finish_list.set()
+        stale_result, _ = await read
+        self.assertEqual(stale_result[0].title, "Task")
+        self.assertEqual(cache.fills, [])
+
+        current, _ = await service.list(
+            project_id=self.project.id, user_id=self.owner.id
+        )
+        self.assertEqual(current[0].title, "new title")
+        self.assertEqual(cache.fills, ["new title"])
+
+    async def test_task_mutations_rotate_cache_only_after_commit(self) -> None:
+        class Cache:
+            def __init__(self, events: list[str]) -> None:
+                self.events = events
+
+            async def generation(self, project_id):
+                return "g"
+
+            async def get(self, project_id, generation, query_digest):
+                return None
+
+            async def set_if_current(self, *args):
+                return True
+
+            async def rotate(self, project_id):
+                self.events.append("cache_rotate")
+
+        cache = Cache(self.uow.events)
+        service = TaskService(self.uow, cache)
+        created = await service.create(project_id=self.project.id, user_id=self.owner.id, title="cached")
+        self.assertLess(self.uow.events.index("commit"), self.uow.events.index("cache_rotate"))
+
+        self.uow.events.clear()
+        self.uow.commit_error = RuntimeError("commit failed")
+        with self.assertRaisesRegex(RuntimeError, "commit failed"):
+            await service.update(created.id, {"title": "no commit"}, self.owner.id)
+        self.assertNotIn("cache_rotate", self.uow.events)
+
+        self.uow.commit_error = None
+        self.uow.events.clear()
+        await service.update(created.id, {"title": "updated"}, self.owner.id)
+        self.assertLess(self.uow.events.index("commit"), self.uow.events.index("cache_rotate"))
+        self.uow.events.clear()
+        await service.delete(created.id, self.owner.id)
+        self.assertLess(self.uow.events.index("commit"), self.uow.events.index("cache_rotate"))
+
+    async def test_cache_failures_degrade_to_database_and_keep_committed_mutations_successful(self) -> None:
+        class BrokenCache:
+            def __init__(self, failure: str) -> None:
+                self.failure = failure
+
+            async def generation(self, project_id):
+                return "g"
+
+            async def get(self, *args):
+                if self.failure == "get":
+                    raise OSError("redis unavailable")
+
+            async def set_if_current(self, *args):
+                if self.failure == "set":
+                    raise OSError("redis unavailable")
+                return True
+
+            async def rotate(self, project_id):
+                if self.failure == "rotate":
+                    raise OSError("redis unavailable")
+
+        await self._create()
+        for failure, message in (("get", "cache read failed"), ("set", "cache fill failed")):
+            service = TaskService(self.uow, BrokenCache(failure))
+            with self.subTest(failure=failure), self.assertLogs("taskhub", level="WARNING") as logs:
+                items, total = await service.list(
+                    project_id=self.project.id, user_id=self.owner.id
+                )
+            self.assertEqual((len(items), total), (1, 1))
+            record = next(record for record in logs.records if message in record.getMessage())
+            self.assertIsNotNone(record.exc_info)
+            self.assertTrue(any("OSError: redis unavailable" in line for line in logs.output))
+            self.assertTrue(any("Traceback (most recent call last)" in line for line in logs.output))
+
+        service = TaskService(self.uow, BrokenCache("rotate"))
+        commits_before = self.uow.commit_count
+        rollbacks_before = self.uow.rollback_count
+        with self.assertLogs("taskhub", level="WARNING") as logs:
+            created = await service.create(
+                project_id=self.project.id,
+                user_id=self.owner.id,
+                title="still succeeds",
+            )
+        self.assertEqual(created.title, "still succeeds")
+        record = next(
+            record
+            for record in logs.records
+            if "cache invalidation failed after commit" in record.getMessage()
+        )
+        self.assertIsNotNone(record.exc_info)
+        self.assertTrue(any("OSError: redis unavailable" in line for line in logs.output))
+        self.assertEqual(self.uow.commit_count, commits_before + 1)
+        self.assertEqual(self.uow.rollback_count, rollbacks_before)
+
+    async def test_unavailable_async_redis_client_falls_back_to_database(self) -> None:
+        from redis.asyncio import Redis
+        from redis.asyncio.retry import Retry
+        from redis.backoff import NoBackoff
+
+        from app.cache.redis_task_list_cache import RedisTaskListCache
+
+        await self._create()
+        unavailable_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        unavailable_socket.bind(("127.0.0.1", 0))
+        unavailable_port = unavailable_socket.getsockname()[1]
+        client = Redis.from_url(
+            f"redis://127.0.0.1:{unavailable_port}/0",
+            socket_connect_timeout=0.1,
+            socket_timeout=0.1,
+            retry=Retry(NoBackoff(), 0),
+            max_connections=1,
+        )
+        try:
+            service = TaskService(
+                self.uow,
+                RedisTaskListCache(client, namespace=f"taskhub:test:{uuid4()}"),
+            )
+            with self.assertLogs("taskhub", level="WARNING") as logs:
+                items, total = await asyncio.wait_for(
+                    service.list(project_id=self.project.id, user_id=self.owner.id),
+                    timeout=2,
+                )
+            self.assertEqual((len(items), total), (1, 1))
+            self.assertTrue(any("cache read failed" in line for line in logs.output))
+        finally:
+            await client.aclose()
+            unavailable_socket.close()
 
     async def test_application_and_unexpected_errors_roll_back(self) -> None:
         with self.assertRaises(PermissionDeniedError):
@@ -749,6 +1023,7 @@ class TaskQueryContractTests(unittest.TestCase):
                     "status": "done",
                     "priority": "high",
                     "assignee_id": str(uuid4()),
+                    "q": "  API Search  ",
                     "page": 2,
                     "limit": 3,
                 },
@@ -764,6 +1039,10 @@ class TaskQueryContractTests(unittest.TestCase):
             default_page = client.get(
                 "/api/v1/tasks", params={"project_id": str(project_id)}
             )
+            padded_max_query = client.get(
+                "/api/v1/tasks",
+                params={"project_id": str(project_id), "q": f"  {'x' * 200}  "},
+            )
             obsolete_offset = client.get(
                 "/tasks",
                 params={
@@ -776,6 +1055,14 @@ class TaskQueryContractTests(unittest.TestCase):
                 client.get(
                     "/tasks",
                     params={"project_id": str(project_id), "page": 0},
+                ),
+                client.get(
+                    "/tasks",
+                    params={"project_id": str(project_id), "q": "x" * 201},
+                ),
+                client.get(
+                    "/tasks",
+                    params={"project_id": str(project_id), "q": "bad\x00query"},
                 ),
                 client.get(
                     "/tasks",
@@ -801,11 +1088,14 @@ class TaskQueryContractTests(unittest.TestCase):
         self.assertEqual(service.calls[0]["status"], TaskStatus.DONE)
         self.assertEqual(service.calls[0]["priority"], TaskPriority.HIGH)
         self.assertIsInstance(service.calls[0]["assignee_id"], UUID)
+        self.assertEqual(service.calls[0]["q"], "API Search")
         self.assertEqual(service.calls[0]["offset"], 3)
         self.assertEqual(service.calls[0]["limit"], 3)
         self.assertEqual(page_two.status_code, 200, page_two.text)
         self.assertEqual(service.calls[1]["offset"], 3)
         self.assertEqual(default_page.status_code, 200, default_page.text)
+        self.assertEqual(padded_max_query.status_code, 200, padded_max_query.text)
+        self.assertEqual(service.calls[3]["q"], "x" * 200)
         self.assertEqual(service.calls[2]["offset"], 0)
         self.assertEqual(service.calls[2]["limit"], 20)
         self.assertEqual(obsolete_offset.status_code, 422)
@@ -815,7 +1105,7 @@ class TaskQueryContractTests(unittest.TestCase):
             for parameter in schema["paths"]["/api/v1/tasks"]["get"]["parameters"]
         }
         self.assertTrue(
-            {"project_id", "status", "priority", "assignee_id", "page", "limit"}
+            {"project_id", "status", "priority", "assignee_id", "q", "page", "limit"}
             <= task_list_parameters
         )
         self.assertNotIn("offset", task_list_parameters)
