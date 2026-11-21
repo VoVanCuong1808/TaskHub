@@ -36,19 +36,7 @@ class TaskListCacheItem(BaseModel):
 
     @classmethod
     def from_task(cls, task: Task) -> TaskListCacheItem:
-        return cls(
-            id=task.id,
-            project_id=task.project_id,
-            created_by=task.created_by,
-            title=task.title,
-            description=task.description,
-            status=task.status,
-            priority=task.priority,
-            due_date=task.due_date,
-            assignee_id=task.assignee_id,
-            created_at=task.created_at,
-            updated_at=task.updated_at,
-        )
+        return cls.model_validate(task, from_attributes=True)
 
     def to_task(self) -> Task:
         return Task(

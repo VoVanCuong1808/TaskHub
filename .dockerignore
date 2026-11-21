@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.env.*
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.agents
+.codex
+.aws
+tests
+specs
+examples

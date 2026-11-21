@@ -92,7 +92,7 @@ class TaskAccess:
         write: bool,
     ) -> tuple[Task, ProjectGrant]:
         task = await self._uow.tasks.get(task_id)
-        if task is None:
+        if task is None or task.project_id is None:
             raise TaskNotFoundError(task_id)
         try:
             grant = await self.project(
@@ -172,7 +172,7 @@ class TaskAccess:
         # Reuse the observed parent project, then reauthorize from locked rows.
         try:
             write_grant = await self.project(
-                task.project_id,
+                read_grant.project.id,
                 user_id,
                 WorkspacePermission.TASK_LABEL_UPDATE,
                 write=True,
@@ -180,9 +180,10 @@ class TaskAccess:
             )
         except ProjectNotFoundError:
             raise TaskNotFoundError(task_id) from None
-        task = await self._uow.tasks.get_for_update(task_id)
-        if task is None or task.project_id != write_grant.project.id:
+        locked_task = await self._uow.tasks.get_for_update(task_id)
+        if locked_task is None or locked_task.project_id != write_grant.project.id:
             raise TaskNotFoundError(task_id)
+        task = locked_task
         if label.project_id != task.project_id:
             raise LabelProjectMismatchError()
         label = await self._uow.labels.get_for_update(label_id)
@@ -205,7 +206,7 @@ class TaskAccess:
             raise CommentNotFoundError()
         parent_task_id = comment.task_id
         task = await self._uow.tasks.get(parent_task_id)
-        if task is None:
+        if task is None or task.project_id is None:
             raise CommentNotFoundError()
         try:
             grant = await self.project(

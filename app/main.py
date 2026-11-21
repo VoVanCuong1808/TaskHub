@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -124,7 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             app.state.task_list_cache = None
             if settings.redis_url:
-                connection_options = parse_url(str(settings.redis_url))
+                connection_options: dict[str, Any] = dict(parse_url(str(settings.redis_url)))
                 connection_options.update(
                     socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
                     socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,

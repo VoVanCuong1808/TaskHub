@@ -53,6 +53,7 @@ from app.schemas.task import TaskCreate, TaskUpdate
 from app.schemas.workspace import WorkspaceCreate
 from app.services.comment_service import CommentService
 from app.services.label_service import LabelService
+from app.services.task_assignment import TaskAssignmentEvent
 from app.services.task_service import TaskService
 
 
@@ -309,6 +310,19 @@ class FakeTaskUnitOfWork:
         self.rollback_count += 1
 
 
+class FakeAssignmentNotifier:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.scheduled: list[TaskAssignmentEvent] = []
+        self.schedule_error: Exception | None = None
+
+    async def schedule(self, event: TaskAssignmentEvent) -> None:
+        self.events.append("schedule_assignment")
+        if self.schedule_error is not None:
+            raise self.schedule_error
+        self.scheduled.append(event)
+
+
 def make_user(
     name: str,
     *,
@@ -502,6 +516,102 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
                 await self._create(assignee_id)
         self.assertEqual(self.uow.commit_count, 0)
         self.assertEqual(self.uow.rollback_count, 4)
+
+    async def test_assignment_notification_is_a_primitive_snapshot_after_commit(self) -> None:
+        notifier = FakeAssignmentNotifier(self.uow.events)
+        service = TaskService(self.uow, assignment_notifier=notifier)
+
+        task = await service.create(
+            project_id=self.project.id,
+            user_id=self.owner.id,
+            title="Assigned task",
+            assignee_id=self.editor.id,
+        )
+
+        self.assertEqual(len(notifier.scheduled), 1)
+        event = notifier.scheduled[0]
+        self.assertIsInstance(event, TaskAssignmentEvent)
+        self.assertEqual(
+            (event.task_id, event.task_title, event.recipient_email),
+            (task.id, task.title, self.editor.email),
+        )
+        self.assertLess(
+            self.uow.events.index("commit"),
+            self.uow.events.index("schedule_assignment"),
+        )
+        with self.assertRaises((AttributeError, TypeError)):
+            event.task_title = "changed"
+
+    async def test_assignment_notification_only_for_new_non_null_assignee(self) -> None:
+        notifier = FakeAssignmentNotifier(self.uow.events)
+        service = TaskService(self.uow, assignment_notifier=notifier)
+        unassigned = await service.create(
+            project_id=self.project.id, user_id=self.owner.id, title="No assignee"
+        )
+        self.assertEqual(notifier.scheduled, [])
+
+        assigned = await service.create(
+            project_id=self.project.id,
+            user_id=self.owner.id,
+            title="Already assigned",
+            assignee_id=self.owner.id,
+        )
+        self.assertEqual(len(notifier.scheduled), 1)
+        await service.update(
+            assigned.id, {"assignee_id": self.owner.id}, self.owner.id
+        )
+        await service.update(assigned.id, {"assignee_id": None}, self.owner.id)
+        await service.update(unassigned.id, {"title": "Still unassigned"}, self.owner.id)
+        await service.update(unassigned.id, {"assignee_id": self.editor.id}, self.owner.id)
+
+        self.assertEqual(len(notifier.scheduled), 2)
+        self.assertEqual(notifier.scheduled[-1].task_id, unassigned.id)
+        self.assertEqual(notifier.scheduled[-1].recipient_email, self.editor.email)
+
+    async def test_assignment_notification_schedule_and_commit_failures_are_safe(self) -> None:
+        notifier = FakeAssignmentNotifier(self.uow.events)
+        service = TaskService(self.uow, assignment_notifier=notifier)
+
+        self.uow.commit_error = RuntimeError("commit failed")
+        with self.assertRaisesRegex(RuntimeError, "commit failed"):
+            await service.create(
+                project_id=self.project.id,
+                user_id=self.owner.id,
+                title="Not committed",
+                assignee_id=self.editor.id,
+            )
+        self.assertEqual(notifier.scheduled, [])
+
+        self.uow.commit_error = None
+        notifier.schedule_error = RuntimeError("smtp secret and message body")
+        with self.assertLogs("taskhub", level="WARNING") as logs:
+            task = await service.create(
+                project_id=self.project.id,
+                user_id=self.owner.id,
+                title="Committed despite notification failure",
+                assignee_id=self.editor.id,
+            )
+        self.assertEqual(task.title, "Committed despite notification failure")
+        self.assertEqual(self.uow.commit_count, 2)
+        self.assertEqual(self.uow.rollback_count, 1)
+        self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        self.assertFalse(any("message body" in line or "secret" in line for line in logs.output))
+
+    async def test_unauthorized_assignment_never_schedules_notification(self) -> None:
+        notifier = FakeAssignmentNotifier(self.uow.events)
+        service = TaskService(self.uow, assignment_notifier=notifier)
+
+        with self.assertRaises(PermissionDeniedError):
+            await service.create(
+                project_id=self.project.id,
+                user_id=self.viewer.id,
+                title="Denied",
+                assignee_id=self.editor.id,
+            )
+
+        self.assertEqual(notifier.scheduled, [])
+        self.assertEqual(self.uow.commit_count, 0)
+        self.assertEqual(self.uow.rollback_count, 1)
 
     async def test_service_owns_transaction_and_documented_lock_order(self) -> None:
         await self._create(self.editor.id)

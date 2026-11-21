@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Response, status
 
 from app.api.pagination import PaginationDep
+from app.api.responses import error_responses
 from app.core.deps import CurrentUserDep, WorkspaceServiceDep
 from app.schemas.common import Page
 from app.schemas.workspace import (
@@ -16,7 +17,10 @@ from app.schemas.workspace import (
     WorkspaceUpdate,
 )
 
-router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+router = APIRouter(
+    prefix="/workspaces", tags=["workspaces"],
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
+)
 
 
 @router.post("", response_model=WorkspaceRead, status_code=status.HTTP_201_CREATED)

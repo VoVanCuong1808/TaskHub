@@ -20,11 +20,17 @@ class WorkspaceStore(Protocol):
 
     async def get_for_update(self, workspace_id: UUID) -> Workspace | None: ...
 
+    async def get_for_share(self, workspace_id: UUID) -> Workspace | None: ...
+
     async def get_member(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMember | None: ...
 
     async def get_member_for_update(
+        self, workspace_id: UUID, user_id: UUID
+    ) -> WorkspaceMember | None: ...
+
+    async def get_member_for_share(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMember | None: ...
 

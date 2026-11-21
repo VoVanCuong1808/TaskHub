@@ -39,6 +39,14 @@ class WorkspaceRepository:
             .execution_options(populate_existing=True)
         )
 
+    async def get_for_share(self, workspace_id: UUID) -> Workspace | None:
+        return await self._session.scalar(
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        )
+
     async def get_member(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMember | None:
@@ -54,6 +62,19 @@ class WorkspaceRepository:
                 WorkspaceMember.user_id == user_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    async def get_member_for_share(
+        self, workspace_id: UUID, user_id: UUID
+    ) -> WorkspaceMember | None:
+        return await self._session.scalar(
+            select(WorkspaceMember)
+            .where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
+            .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
 

@@ -1,6 +1,7 @@
 """Reusable OpenAPI response declarations for existing HTTP error shapes."""
 
 from copy import deepcopy
+from typing import Any
 
 from app.schemas.common import (
     ApiErrorDetail,
@@ -36,9 +37,11 @@ _ERROR_RESPONSES = {
 
 def error_responses(
     *status_codes: int, domain_422: bool = False
-) -> dict[int, dict[str, object]]:
+) -> dict[int | str, dict[str, Any]]:
     """Return fresh FastAPI response declarations for the requested statuses."""
-    responses = {code: deepcopy(_ERROR_RESPONSES[code]) for code in status_codes if code != 422}
+    responses: dict[int | str, dict[str, Any]] = {
+        code: deepcopy(_ERROR_RESPONSES[code]) for code in status_codes if code != 422
+    }
     if 422 in status_codes:
         responses[422] = {
             "model": ApiErrorOrValidation if domain_422 else RequestValidationDetail,

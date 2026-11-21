@@ -1,19 +1,19 @@
 # TaskHub
 
-FastAPI skeleton theo **Layered Architecture** (AI-friendly): API → Service → Repository → Model.
+API quản lý công việc theo **Layered Architecture**: API → Service → Repository → Model.
 Không cần activate virtualenv — mọi thứ chạy qua `uv`.
 
 ## Yêu cầu
 
 - Python 3.12 (đã pin trong `.python-version`)
 - [uv](https://docs.astral.sh/uv/)
+- Docker Compose
 
 ## Cài đặt
 
 ```powershell
 uv python install 3.12
-docker compose -f compose.local.yaml up -d --wait
-uv sync
+uv sync --frozen
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 $script = @'
 from pathlib import Path
@@ -32,14 +32,41 @@ else:
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 '@
 $script | python -
+docker compose -f compose.yaml up --build -d --wait
+```
+
+Compose starts the API, PostgreSQL, Redis and local Mailpit capture service.
+The setup preserves an existing `.env` and signing key. If the key is blank or
+missing, it writes a private random key directly to `.env` without printing it.
+The app is at `http://127.0.0.1:8000`; Mailpit's inbox is at
+`http://127.0.0.1:8025`. If port 8000 is occupied, set a free host port for this
+PowerShell session before `docker compose`, for example:
+
+```powershell
+$env:TASKHUB_HTTP_PORT = "8001"
+docker compose -f compose.yaml up --build -d --wait
+```
+
+Khi đổi port, thay `8000` bằng port đã chọn ở các URL API/health/docs bên dưới.
+
+PostgreSQL and Redis in this stack are private to its Compose network. The
+PostgreSQL data uses a dedicated durable `taskhub-stack` volume; it does not
+reuse the host-development database volume on port 5433.
+
+### Chạy ứng dụng trên host
+
+Nếu muốn chạy API bằng `uvicorn` trên host, thay vào đó khởi động riêng
+PostgreSQL và Redis local rồi migrate và chạy ứng dụng:
+
+```powershell
+docker compose -f compose.local.yaml up -d --wait
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The local dependency stack is only PostgreSQL and Redis; the app runs on the host.
-The setup preserves an existing `.env` and existing signing key. If the key is
-blank or missing, it writes a private random key directly to `.env` without
-printing it.
+`.env.example` trỏ database host tới port 5433 và Redis tới 6379. Host workflow
+này không có Mailpit; đặt các biến SMTP để dùng SMTP phù hợp hoặc để trống
+`TASKHUB_SMTP_HOST` để tắt email.
 
 `uv run alembic downgrade base` removes all tables; use it only for a disposable DB.
 
@@ -79,6 +106,7 @@ uv run uvicorn app.main:app --reload --port 8000
 
 - Health: http://127.0.0.1:8000/health
 - Swagger UI: http://127.0.0.1:8000/docs
+- ReDoc: http://127.0.0.1:8000/redoc
 - OpenAPI: http://127.0.0.1:8000/openapi.json
 
 ## API
@@ -109,6 +137,11 @@ Workspace API: `POST/GET /api/v1/workspaces`, `GET/PATCH/DELETE
 /api/v1/workspaces/{id}`, cùng `/members` và `/members/{user_id}`. Owner tạo
 workspace, mời user đang hoạt động làm EDITOR/VIEWER, đổi role và xóa member;
 OWNER không thể bị đổi role hoặc xóa. Mọi endpoint cần Bearer access token.
+
+Project API: `POST/GET /api/v1/workspaces/{workspace_id}/projects` tạo và liệt
+kê project trong workspace; `GET/PATCH/DELETE /api/v1/projects/{project_id}`
+đọc, cập nhật, archive/restore bằng `status` (`active`/`archived`) hoặc xóa.
+OWNER/EDITOR được ghi, VIEWER chỉ đọc. Workspace của project không thể đổi.
 
 Browser client tối giản nằm ở `examples/auth-client.js`. Client chỉ lưu access
 token ngắn hạn trong `localStorage` dưới key `taskhub_access_token`; JavaScript
@@ -141,6 +174,8 @@ không nhận refresh token trong JSON hoặc Authorization header.
 
 | Method | Path                  | Status | Mô tả                         |
 | ------ | --------------------- | ------ | ----------------------------- |
+| POST/GET | `/api/v1/workspaces/{workspace_id}/projects` | 201/200 | Tạo hoặc liệt kê project |
+| GET/PATCH/DELETE | `/api/v1/projects/{project_id}` | 200/200/204 | Đọc, sửa/archive/restore, xóa project |
 | POST   | `/api/v1/tasks`       | 201    | Tạo task trong `project_id`   |
 | GET    | `/api/v1/tasks?project_id={uuid}` | 200 | Danh sách project (`q`, `status`, `priority`, `assignee_id`, `page`, `limit`) |
 | GET    | `/api/v1/tasks/{id}`  | 200/404| Chi tiết                      |
@@ -170,6 +205,14 @@ Pagination dùng `page` bắt đầu từ 1 và `limit` mặc định 20 (1–20
 query `offset` đã bị loại bỏ và trả 422. Alias ẩn `/tasks` dùng cùng `q`, các
 filter và pagination.
 
+Khi tạo task có `assignee_id`, hoặc đổi assignee sang một user khác, API xếp
+lịch email sau khi transaction đã commit. Giữ nguyên assignee, bỏ assignee hoặc
+task không có assignee thì không gửi email trùng. Mailpit trong Compose chỉ thu
+email local, không relay ra ngoài. Gửi email chạy best-effort trong process của
+API; lỗi SMTP không làm hỏng task đã commit, nhưng email chưa xử lý có thể mất
+nếu process dừng đột ngột. Đây không phải hàng đợi bền vững và không cam kết
+exactly-once.
+
 Label thuộc cố định một project và chỉ gắn được vào task cùng project. Label và
 comment dùng response phân trang `{items,total}`. OWNER/EDITOR được ghi;
 VIEWER chỉ đọc. Comment chỉ tác giả hiện còn quyền ghi task mới được sửa/xoá.
@@ -179,20 +222,34 @@ phản chiếu CRUD task cũ.
 Ví dụ:
 
 ```powershell
+$password = "<password tối thiểu 12 ký tự>"
+$registered = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/auth/register `
+  -ContentType "application/json" `
+  -Body (@{ email = "you@example.com"; full_name = "You"; password = $password } | ConvertTo-Json)
 $login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/auth/login `
-  -ContentType "application/json" -Body (@{ email = "you@example.com"; password = "<password>" } | ConvertTo-Json)
+  -ContentType "application/json" -Body (@{ email = "you@example.com"; password = $password } | ConvertTo-Json)
 $accessToken = $login.access_token
 $headers = @{ Authorization = "Bearer $accessToken" }
-$projectId = "<UUID của project bạn có quyền truy cập>"
+$workspace = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/workspaces `
+  -Headers $headers -ContentType "application/json" `
+  -Body (@{ name = "Product" } | ConvertTo-Json)
+$project = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/workspaces/$($workspace.id)/projects" `
+  -Headers $headers -ContentType "application/json" `
+  -Body (@{ name = "Release"; description = "Release planning" } | ConvertTo-Json)
+$projectId = $project.id
 $body = @{
   project_id = $projectId
-  title = "Viết README"
-  description = "Mô tả dự án"
+  title = "Prepare release notes"
+  description = "Draft the release summary"
   priority = "high"
   due_date = "2026-12-01T09:00:00+07:00"
+  assignee_id = $registered.id
 } | ConvertTo-Json
 $task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/v1/tasks `
   -Headers $headers -ContentType "application/json" -Body $body
+
+# Task đã commit sẽ xếp email vào Mailpit: http://127.0.0.1:8025
 
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId" -Headers $headers
 
@@ -221,6 +278,10 @@ Invoke-RestMethod -Method Patch -Uri "http://127.0.0.1:8000/api/v1/comments/$($c
   -Headers $headers -ContentType "application/json" `
   -Body (@{ content = "Reviewed" } | ConvertTo-Json)
 
+# Search literal không phân biệt hoa thường; cache được bật khi dùng Compose
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/tasks?project_id=$projectId&q=release&page=1&limit=20" `
+  -Headers $headers
+
 Invoke-RestMethod -Method Delete -Uri "http://127.0.0.1:8000/api/v1/tasks/$($task.id)" -Headers $headers
 ```
 
@@ -247,6 +308,18 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`; các giá trị local 
 | `TASKHUB_REFRESH_COOKIE_SECURE` | `true` (production bắt buộc) |
 | `TASKHUB_REFRESH_COOKIE_SAMESITE` | `lax` |
 | `TASKHUB_FRONTEND_ORIGINS` | `[]` (JSON list origin chính xác) |
+| `TASKHUB_SMTP_HOST` | để trống thì tắt email; Compose dùng Mailpit nội bộ |
+| `TASKHUB_SMTP_PORT` | `1025` |
+| `TASKHUB_SMTP_FROM_EMAIL` | `no-reply@example.com` |
+| `TASKHUB_SMTP_USERNAME` | trống hoặc username SMTP |
+| `TASKHUB_SMTP_PASSWORD` | trống hoặc password; kiểu `SecretStr`, không trim secret |
+| `TASKHUB_SMTP_STARTTLS` | `false` (Mailpit local không cần TLS) |
+| `TASKHUB_SMTP_TIMEOUT_SECONDS` | `5` (lớn hơn 0 và tối đa 30) |
+
+SMTP username và password phải cùng được đặt hoặc cùng để trống. SMTP host trống
+vô hiệu hoá adapter email. API docs mô tả Bearer authentication và các response
+lỗi; lỗi nghiệp vụ dùng `{ "detail": "..." }`, validation dùng `detail` dạng
+danh sách. Full Compose chỉ gửi tới Mailpit local, không relay email ra ngoài.
 
 ## Kiểm thử database
 
@@ -260,6 +333,15 @@ test database in the local application PostgreSQL container. Run the suite with:
 $env:TASKHUB_TEST_DATABASE_URL = "postgresql+asyncpg://postgres:taskhub@127.0.0.1:5432/taskhub_test"
 $env:TASKHUB_TEST_REDIS_URL = "redis://127.0.0.1:6380/0"
 uv run python -m unittest discover -s tests -v
+```
+
+Kiểm tra tĩnh và unit tests không cần database:
+
+```powershell
+uv run ruff check app tests
+uv run mypy app
+uv run python -m unittest tests.test_project_api tests.test_project_service `
+  tests.test_task_assignment_notifications tests.test_task_service
 ```
 
 Test migration chạy `downgrade base` rồi `upgrade head`; sau test sẽ downgrade về `base`.
@@ -304,6 +386,7 @@ taskhub/
 │   │   ├── router.py            # API v1 aggregation
 │   │   ├── auth.py              # register/login/refresh/logout HTTP adapter
 │   │   ├── users.py             # current-user HTTP adapter
+│   │   ├── projects.py          # project HTTP adapter
 │   │   └── tasks.py             # task HTTP adapter
 │   ├── core/
 │   │   ├── config.py            # Settings (env TASKHUB_*)
@@ -314,13 +397,17 @@ taskhub/
 │   ├── cache/                   # Redis adapters and validated cache snapshots
 │   ├── db/                      # engine, metadata, seed, legacy utility
 │   ├── models/                  # entities, enums, and task domain model
-│   ├── repositories/            # PostgreSQL task and user persistence
+│   ├── notifications/           # SMTP transport and BackgroundTasks adapter
+│   ├── repositories/            # SQL-only PostgreSQL persistence
 │   ├── schemas/                 # Pydantic request, response, and shared types
-│   ├── services/                # task/auth rules and cache ports
+│   ├── services/                # project/task/auth use cases and ports
 │   └── main.py                  # app factory, middleware, exception handlers
 ├── alembic/versions/            # schema migrations
 ├── examples/                    # browser auth client and flow test
 ├── tests/                       # unit and PostgreSQL integration tests
+├── Dockerfile
+├── compose.yaml                 # full API/PostgreSQL/Redis/Mailpit stack
+├── .dockerignore
 ├── pyproject.toml
 ├── .python-version
 └── README.md

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -136,7 +137,7 @@ class WorkspaceService:
         *,
         offset: int = 0,
         limit: int = DEFAULT_PAGE_LIMIT,
-    ) -> tuple[list[WorkspaceMember], int]:
+    ) -> tuple[builtins.list[WorkspaceMember], int]:
         await self._authorize(
             workspace_id, user_id, WorkspacePermission.MEMBER_READ
         )

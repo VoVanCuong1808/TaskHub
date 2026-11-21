@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, RedisDsn, SecretStr, field_validator, model_validator
+from pydantic import (
+    EmailStr,
+    Field,
+    RedisDsn,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.constants import (
+    SMTP_DEFAULT_PORT,
+    SMTP_MAX_TIMEOUT_SECONDS,
+    SMTP_TIMEOUT_SECONDS,
+)
 
 ENV_PREFIX = "TASKHUB_"
 
@@ -32,11 +46,20 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub"
     database_echo: bool = False
     redis_url: RedisDsn | None = None
+    smtp_host: str | None = Field(default=None, max_length=255)
+    smtp_port: int = Field(default=SMTP_DEFAULT_PORT, ge=1, le=65535)
+    smtp_from_email: EmailStr = "no-reply@example.com"
+    smtp_username: str | None = Field(default=None, min_length=1, max_length=320)
+    smtp_password: SecretStr | None = None
+    smtp_starttls: bool = False
+    smtp_timeout_seconds: float = Field(
+        default=SMTP_TIMEOUT_SECONDS, gt=0, le=SMTP_MAX_TIMEOUT_SECONDS
+    )
     jwt_secret_key: SecretStr | None = None
     access_token_minutes: int = Field(default=15, ge=1, le=1440)
     refresh_token_days: int = Field(default=30, ge=1, le=365)
     refresh_cookie_secure: bool = True
-    refresh_cookie_samesite: str = "lax"
+    refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     frontend_origins: list[str] = Field(default_factory=list)
 
     @field_validator("redis_url", mode="before")
@@ -44,9 +67,40 @@ class Settings(BaseSettings):
     def empty_redis_url_disables_cache(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
 
-    @field_validator("refresh_cookie_samesite")
+    @field_validator("smtp_host", mode="before")
     @classmethod
-    def valid_samesite(cls, value: str) -> str:
+    def normalize_smtp_host(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        host = value.strip()
+        if not host:
+            return None
+        if any(
+            character.isspace() or ord(character) < 33 or character in "/@?#"
+            for character in host
+        ):
+            raise ValueError("SMTP host must be a hostname or address")
+        return host
+
+    @field_validator("smtp_username", mode="before")
+    @classmethod
+    def normalize_smtp_username(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("smtp_password", mode="before")
+    @classmethod
+    def blank_smtp_password_disables_auth(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator("refresh_cookie_samesite", mode="before")
+    @classmethod
+    def valid_samesite(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
         value = value.lower()
         if value not in {"lax", "strict", "none"}:
             raise ValueError("must be lax, strict, or none")
@@ -86,6 +140,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def secure_cookie_policy(self) -> Settings:
+        if (self.smtp_username is None) != (self.smtp_password is None):
+            raise ValueError("SMTP username and password must be configured together")
+        if self.smtp_username is not None and self.smtp_host is None:
+            raise ValueError("SMTP credentials require an SMTP host")
         if self.refresh_cookie_samesite == "none" and not self.refresh_cookie_secure:
             raise ValueError("SameSite=None requires a Secure refresh cookie")
         if (

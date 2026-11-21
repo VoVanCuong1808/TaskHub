@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -34,7 +35,7 @@ class LabelRepository:
 
     async def list_for_task(
         self, task_id: UUID, *, offset: int, limit: int
-    ) -> tuple[list[Label], int]:
+    ) -> tuple[builtins.list[Label], int]:
         scope = (
             select(Label)
             .join(TaskLabel, TaskLabel.label_id == Label.id)
@@ -92,7 +93,7 @@ class LabelRepository:
         result = await self._session.execute(
             delete(TaskLabel).where(
                 TaskLabel.task_id == task_id, TaskLabel.label_id == label_id
-            )
+            ).returning(TaskLabel.task_id)
         )
         await self._session.flush()
-        return bool(result.rowcount)
+        return result.scalar_one_or_none() is not None

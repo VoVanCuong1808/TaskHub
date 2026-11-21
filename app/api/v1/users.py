@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, status
 
+from app.api.responses import error_responses
 from app.core.deps import AuthServiceDep, CurrentUserDep
 from app.schemas.user import ChangePasswordRequest, UserRead, UserUpdate
 
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.get(
     "/me",
     response_model=UserRead,
-    responses={401: {"description": "Not authenticated"}},
+    responses=error_responses(401),
 )
 async def get_me(user: CurrentUserDep) -> UserRead:
     return UserRead.model_validate(user)
@@ -20,10 +21,7 @@ async def get_me(user: CurrentUserDep) -> UserRead:
 @router.patch(
     "/me",
     response_model=UserRead,
-    responses={
-        401: {"description": "Not authenticated"},
-        409: {"description": "Email already exists"},
-    },
+    responses=error_responses(401, 409, 422, domain_422=True),
 )
 async def update_me(
     payload: UserUpdate,
@@ -37,7 +35,7 @@ async def update_me(
 @router.post(
     "/me/change-password",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={401: {"description": "Invalid current password"}},
+    responses=error_responses(401, 422),
 )
 async def change_password(
     payload: ChangePasswordRequest,

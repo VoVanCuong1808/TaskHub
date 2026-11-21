@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from app.api.responses import error_responses
 from app.core.config import Settings
 from app.core.constants import (
     AUTH_INVALID_REFRESH_TOKEN_MESSAGE,
@@ -105,7 +106,7 @@ def authentication_error_response(exc: AuthenticationError) -> JSONResponse:
     "/register",
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
-    responses={409: {"description": "Email already exists"}},
+    responses=error_responses(409, 422),
 )
 async def register(payload: RegisterRequest, service: AuthServiceDep) -> UserRead:
     user = await service.register(
@@ -117,10 +118,7 @@ async def register(payload: RegisterRequest, service: AuthServiceDep) -> UserRea
 @router.post(
     "/login",
     response_model=AccessToken,
-    responses={
-        401: {"description": "Invalid credentials"},
-        403: {"description": "Untrusted Origin"},
-    },
+    responses=error_responses(401, 403, 422),
 )
 async def login(
     _origin: LoginOriginGuard,
@@ -137,10 +135,7 @@ async def login(
 @router.post(
     "/refresh",
     response_model=AccessToken,
-    responses={
-        401: {"description": "Invalid refresh token"},
-        403: {"description": "Untrusted Origin"},
-    },
+    responses=error_responses(401, 403, 422),
 )
 async def refresh(
     _origin: OriginGuard,
@@ -159,10 +154,7 @@ async def refresh(
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={
-        401: {"description": "Invalid refresh token"},
-        403: {"description": "Untrusted Origin"},
-    },
+    responses=error_responses(401, 403, 422),
 )
 async def logout(
     _origin: OriginGuard,

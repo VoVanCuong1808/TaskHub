@@ -7,13 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.constants import DEFAULT_PAGE_LIMIT
+from app.models.entities import Task as TaskRow
 from app.models.entities import (
-    Project,
     User,
     Workspace,
     WorkspaceMember,
 )
-from app.models.entities import Task as TaskRow
 from app.models.enums import TaskPriority, TaskStatus
 from app.models.task import Task
 
@@ -139,22 +138,6 @@ class TaskRepository:
         if row is not None:
             await self._session.delete(row)
             await self._session.flush()
-
-
-class TaskProjectRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def get(self, project_id: UUID) -> Project | None:
-        return await self._session.get(Project, project_id)
-
-    async def get_for_share(self, project_id: UUID) -> Project | None:
-        return await self._session.scalar(
-            select(Project)
-            .where(Project.id == project_id)
-            .with_for_update(read=True)
-            .execution_options(populate_existing=True)
-        )
 
 
 class TaskWorkspaceRepository:

@@ -1,6 +1,7 @@
 """Project labels and task-label association use cases."""
 
 from collections.abc import Mapping
+from typing import cast
 from uuid import UUID
 
 from app.core.constants import DEFAULT_PAGE_LIMIT
@@ -60,8 +61,8 @@ class LabelService:
             )
             return await self._uow.labels.update(
                 label,
-                name=changes.get("name"),
-                color=changes.get("color"),
+                name=cast(str | None, changes.get("name")),
+                color=cast(str | None, changes.get("color")),
             )
 
     async def delete_label(self, label_id: UUID, user_id: UUID) -> None:
