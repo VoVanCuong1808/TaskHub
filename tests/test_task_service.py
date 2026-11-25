@@ -556,7 +556,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
             title="Already assigned",
             assignee_id=self.owner.id,
         )
-        self.assertEqual(len(notifier.scheduled), 1)
+        self.assertEqual(notifier.scheduled, [])
         await service.update(
             assigned.id, {"assignee_id": self.owner.id}, self.owner.id
         )
@@ -564,9 +564,30 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.update(unassigned.id, {"title": "Still unassigned"}, self.owner.id)
         await service.update(unassigned.id, {"assignee_id": self.editor.id}, self.owner.id)
 
-        self.assertEqual(len(notifier.scheduled), 2)
+        self.assertEqual(len(notifier.scheduled), 1)
         self.assertEqual(notifier.scheduled[-1].task_id, unassigned.id)
         self.assertEqual(notifier.scheduled[-1].recipient_email, self.editor.email)
+
+    async def test_self_assignment_does_not_schedule_email_on_create_or_update(self) -> None:
+        notifier = FakeAssignmentNotifier(self.uow.events)
+        service = TaskService(self.uow, assignment_notifier=notifier)
+
+        await service.create(
+            project_id=self.project.id,
+            user_id=self.owner.id,
+            title="Assigned to creator",
+            assignee_id=self.owner.id,
+        )
+        unassigned = await service.create(
+            project_id=self.project.id,
+            user_id=self.owner.id,
+            title="Assigned to creator later",
+        )
+        await service.update(
+            unassigned.id, {"assignee_id": self.owner.id}, self.owner.id
+        )
+
+        self.assertEqual(notifier.scheduled, [])
 
     async def test_assignment_notification_schedule_and_commit_failures_are_safe(self) -> None:
         notifier = FakeAssignmentNotifier(self.uow.events)
@@ -595,6 +616,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.uow.commit_count, 2)
         self.assertEqual(self.uow.rollback_count, 1)
         self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        self.assertTrue(any(str(task.id) in line for line in logs.output))
         self.assertFalse(any("message body" in line or "secret" in line for line in logs.output))
 
     async def test_unauthorized_assignment_never_schedules_notification(self) -> None:

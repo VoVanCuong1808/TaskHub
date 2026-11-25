@@ -4,7 +4,11 @@ import unittest
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from app.core.exceptions import PermissionDeniedError, ProjectNotFoundError
+from app.core.exceptions import (
+    PermissionDeniedError,
+    ProjectNotFoundError,
+    WorkspaceNotFoundError,
+)
 from app.models.entities import Project, Workspace, WorkspaceMember
 from app.models.enums import ProjectStatus, WorkspaceRole
 from app.services.project_service import ProjectService
@@ -182,7 +186,7 @@ class ProjectServiceTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ProjectNotFoundError):
                     await self.service.get(missing_id, actor_id)
 
-    async def test_editor_can_archive_restore_and_delete_with_post_commit_cache_rotation(self) -> None:
+    async def test_editor_can_archive_restore_but_only_owner_can_delete(self) -> None:
         archived = await self.service.update(
             self.project.id, {"status": ProjectStatus.ARCHIVED}, self.editor_id
         )
@@ -205,7 +209,10 @@ class ProjectServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cache.rotated, [self.project.id, self.project.id])
 
         self.uow.events.clear()
-        await self.service.delete(self.project.id, self.editor_id)
+        with self.assertRaises(PermissionDeniedError):
+            await self.service.delete(self.project.id, self.editor_id)
+        self.assertIn(self.project.id, self.uow.projects.items)
+        await self.service.delete(self.project.id, self.owner_id)
         self.assertNotIn(self.project.id, self.uow.projects.items)
         self.assertEqual(self.cache.rotated[-1], self.project.id)
         self.assertLess(self.uow.events.index("commit"), self.uow.events.index("rotate_cache"))
@@ -251,17 +258,27 @@ class ProjectServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.uow.rollback_count, 1)
         self.assertEqual(len(self.cache.rotated), rotations_before)
 
-    async def test_list_is_visible_to_viewer_and_hides_missing_or_outsider_workspace(self) -> None:
+    async def test_list_preserves_workspace_not_found_for_missing_or_outsider(self) -> None:
         page, total = await self.service.list(
             workspace_id=self.workspace.id, user_id=self.viewer_id, limit=1
         )
         self.assertEqual(([project.id for project in page], total), ([self.project.id], 1))
-        with self.assertRaises(ProjectNotFoundError):
+        with self.assertRaises(WorkspaceNotFoundError):
             await self.service.list(
                 workspace_id=self.workspace.id, user_id=self.outsider_id
             )
-        with self.assertRaises(ProjectNotFoundError):
+        with self.assertRaises(WorkspaceNotFoundError):
             await self.service.list(workspace_id=uuid4(), user_id=self.owner_id)
+        with self.assertRaises(WorkspaceNotFoundError):
+            await self.service.create(
+                workspace_id=uuid4(), user_id=self.owner_id, name="Hidden"
+            )
+        with self.assertRaises(WorkspaceNotFoundError):
+            await self.service.create(
+                workspace_id=self.workspace.id,
+                user_id=self.outsider_id,
+                name="Hidden",
+            )
 
     async def test_failed_authorization_rolls_back_without_cache_rotation(self) -> None:
         with self.assertRaises(PermissionDeniedError):

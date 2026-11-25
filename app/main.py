@@ -118,7 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if secret is None:
             raise RuntimeError("TASKHUB_JWT_SECRET_KEY must be configured")
         app.state.engine = make_engine(
-            settings.database_url, echo=settings.database_echo
+            settings.resolved_database_url, echo=settings.database_echo
         )
         app.state.session_factory = make_session_factory(app.state.engine)
         redis_client = None

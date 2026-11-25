@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import builtins
-import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from uuid import UUID
 
 from app.core.constants import (
@@ -17,38 +14,23 @@ from app.core.constants import (
     WORKSPACE_OWNER_ROLE_RESERVED_MESSAGE,
 )
 from app.core.exceptions import (
-    ApplicationError,
     WorkspaceConflictError,
     WorkspaceMemberNotFoundError,
     WorkspaceNotFoundError,
 )
 from app.models.entities import Workspace, WorkspaceMember
 from app.models.enums import WorkspacePermission, WorkspaceRole
+from app.services.transaction import transaction_scope
 from app.services.workspace_authorization import (
     WorkspaceAuthorizationContext,
     authorize_workspace_access,
 )
 from app.services.workspace_uow import WorkspaceUnitOfWork
 
-logger = logging.getLogger("taskhub")
-
 
 class WorkspaceService:
     def __init__(self, uow: WorkspaceUnitOfWork) -> None:
         self._uow = uow
-
-    @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[None]:
-        try:
-            yield
-            await self._uow.commit()
-        except ApplicationError:
-            await self._uow.rollback()
-            raise
-        except Exception:
-            logger.exception("Workspace transaction failed; rolling back")
-            await self._uow.rollback()
-            raise
 
     async def _authorize(
         self,
@@ -82,7 +64,7 @@ class WorkspaceService:
         return workspace, member
 
     async def create(self, name: str, owner_id: UUID) -> Workspace:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace = await self._uow.workspaces.add(
                 Workspace(name=name, owner_id=owner_id)
             )
@@ -111,7 +93,7 @@ class WorkspaceService:
     async def update(
         self, workspace_id: UUID, user_id: UUID, name: str
     ) -> Workspace:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace, _ = await self._authorize(
                 workspace_id,
                 user_id,
@@ -121,7 +103,7 @@ class WorkspaceService:
             return await self._uow.workspaces.update(workspace, name)
 
     async def delete(self, workspace_id: UUID, user_id: UUID) -> None:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace, _ = await self._authorize(
                 workspace_id,
                 user_id,
@@ -152,7 +134,7 @@ class WorkspaceService:
         email: str,
         role: WorkspaceRole,
     ) -> WorkspaceMember:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace, _ = await self._authorize(
                 workspace_id,
                 actor_id,
@@ -186,7 +168,7 @@ class WorkspaceService:
         user_id: UUID,
         role: WorkspaceRole,
     ) -> WorkspaceMember:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace, actor_member = await self._authorize(
                 workspace_id,
                 actor_id,
@@ -211,7 +193,7 @@ class WorkspaceService:
     async def remove_member(
         self, workspace_id: UUID, actor_id: UUID, user_id: UUID
     ) -> None:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Workspace transaction failed"):
             workspace, actor_member = await self._authorize(
                 workspace_id,
                 actor_id,

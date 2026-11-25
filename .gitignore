@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .env
+# Local agent handoff notes are not project documentation.
+specs/day8-worker-checkpoint.md

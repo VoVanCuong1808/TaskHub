@@ -40,7 +40,6 @@ class ProjectPayloadBase(BaseModel):
 class ProjectCreate(ProjectPayloadBase):
     name: ProjectName
     description: ProjectDescription | None = None
-    status: ProjectStatus = ProjectStatus.ACTIVE
 
 
 class ProjectUpdate(ProjectPayloadBase):

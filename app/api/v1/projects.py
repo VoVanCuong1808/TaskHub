@@ -33,14 +33,16 @@ async def create_project(
     user: CurrentUserDep,
 ) -> ProjectRead:
     return ProjectRead.model_validate(
-        await service.create(workspace_id=workspace_id, user_id=user.id, **payload.model_dump())
+        await service.create(
+            workspace_id=workspace_id, user_id=user.id, **payload.model_dump()
+        )
     )
 
 
 @router.get(
     "/workspaces/{workspace_id}/projects",
     response_model=Page[ProjectRead],
-    responses=error_responses(401, 403, 404, 422),
+    responses=error_responses(401, 404, 422),
     summary="List projects",
     description=(
         "Requires a Bearer access token and a visible workspace. Results are "
@@ -68,7 +70,7 @@ async def list_projects(
 @router.get(
     "/projects/{project_id}",
     response_model=ProjectRead,
-    responses=error_responses(401, 403, 404),
+    responses=error_responses(401, 404),
     summary="Get a project",
     description="Requires a Bearer access token and workspace visibility for the project.",
 )
@@ -105,7 +107,7 @@ async def update_project(
     responses=error_responses(401, 403, 404),
     summary="Delete a project",
     description=(
-        "Requires a Bearer access token. Owners and editors may delete a project; "
+        "Requires a Bearer access token. Only the workspace owner may permanently delete a project; "
         "its tasks, labels, links, and comments are removed by database cascades."
     ),
 )

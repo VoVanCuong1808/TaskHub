@@ -22,7 +22,11 @@ async def _deliver_safely(
     try:
         await sender.send(event)
     except Exception as exc:  # noqa: BLE001 - a committed task must survive mail errors
-        logger.warning("Task assignment email delivery failed (%s)", type(exc).__name__)
+        logger.warning(
+            "Task assignment email delivery failed for task %s (%s)",
+            event.task_id,
+            type(exc).__name__,
+        )
 
 
 class BackgroundTaskAssignmentNotifier:

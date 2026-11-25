@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from typing import cast
 from uuid import UUID
 
 from app.core.constants import DEFAULT_PAGE_LIMIT
 from app.core.exceptions import (
-    ApplicationError,
     ProjectNotFoundError,
     WorkspaceNotFoundError,
 )
@@ -18,6 +16,7 @@ from app.models.entities import Project
 from app.models.enums import ProjectStatus, WorkspacePermission
 from app.services.project_uow import ProjectUnitOfWork
 from app.services.task_list_cache import TaskListCache
+from app.services.transaction import transaction_scope
 from app.services.workspace_authorization import (
     WorkspaceAuthorizationContext,
     authorize_workspace_access,
@@ -34,19 +33,6 @@ class ProjectService:
         self._uow = uow
         self._cache = cache
 
-    @asynccontextmanager
-    async def _transaction(self) -> AsyncIterator[None]:
-        try:
-            yield
-            await self._uow.commit()
-        except ApplicationError:
-            await self._uow.rollback()
-            raise
-        except BaseException:
-            logger.exception("Project transaction failed; rolling back")
-            await self._uow.rollback()
-            raise
-
     async def _authorize_workspace(
         self,
         workspace_id: UUID,
@@ -55,14 +41,17 @@ class ProjectService:
         *,
         write: bool,
     ) -> None:
-        context = await self._workspace_context(workspace_id, user_id, write=write)
-        try:
-            authorize_workspace_access(context, user_id, permission)
-        except WorkspaceNotFoundError:
-            raise ProjectNotFoundError() from None
+        context = await self._workspace_context(
+            workspace_id, user_id, write=write
+        )
+        authorize_workspace_access(context, user_id, permission)
 
     async def _workspace_context(
-        self, workspace_id: UUID, user_id: UUID, *, write: bool
+        self,
+        workspace_id: UUID,
+        user_id: UUID,
+        *,
+        write: bool,
     ) -> WorkspaceAuthorizationContext:
         workspaces = self._uow.workspaces
         workspace = await (
@@ -71,7 +60,7 @@ class ProjectService:
             else workspaces.get(workspace_id)
         )
         if workspace is None:
-            raise ProjectNotFoundError()
+            raise WorkspaceNotFoundError()
         member = await (
             workspaces.get_member_for_share(workspace_id, user_id)
             if write
@@ -93,12 +82,14 @@ class ProjectService:
         if project is None:
             raise ProjectNotFoundError()
         workspace_id = project.workspace_id
-        context = await self._workspace_context(workspace_id, user_id, write=write)
-        if write:
-            project = await self._uow.projects.get_for_update(project_id)
-            if project is None or project.workspace_id != workspace_id:
-                raise ProjectNotFoundError()
         try:
+            context = await self._workspace_context(
+                workspace_id, user_id, write=write
+            )
+            if write:
+                project = await self._uow.projects.get_for_update(project_id)
+                if project is None or project.workspace_id != workspace_id:
+                    raise ProjectNotFoundError()
             authorize_workspace_access(context, user_id, permission)
         except WorkspaceNotFoundError:
             raise ProjectNotFoundError() from None
@@ -111,9 +102,8 @@ class ProjectService:
         user_id: UUID,
         name: str,
         description: str | None = None,
-        status: ProjectStatus = ProjectStatus.ACTIVE,
     ) -> Project:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Project transaction failed"):
             await self._authorize_workspace(
                 workspace_id, user_id, WorkspacePermission.PROJECT_CREATE, write=True
             )
@@ -122,7 +112,7 @@ class ProjectService:
                     workspace_id=workspace_id,
                     name=name,
                     description=description,
-                    status=status,
+                    status=ProjectStatus.ACTIVE,
                 )
             )
         return project
@@ -152,7 +142,7 @@ class ProjectService:
     ) -> Project:
         if changes.keys() - PROJECT_UPDATE_FIELDS:
             raise ValueError("Unsupported project fields")
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Project transaction failed"):
             project = await self._project(
                 project_id, user_id, WorkspacePermission.PROJECT_UPDATE, write=True
             )
@@ -170,7 +160,7 @@ class ProjectService:
         return project
 
     async def delete(self, project_id: UUID, user_id: UUID) -> None:
-        async with self._transaction():
+        async with transaction_scope(self._uow, "Project transaction failed"):
             project = await self._project(
                 project_id, user_id, WorkspacePermission.PROJECT_DELETE, write=True
             )

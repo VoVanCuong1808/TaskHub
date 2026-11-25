@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
+from alembic.config import Config
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
+from sqlalchemy.engine import make_url
 
 from app.core.config import Settings
 from app.core.deps import get_task_assignment_notifier
@@ -45,12 +47,35 @@ class SMTPSettingsTests(unittest.TestCase):
             smtp_host="  mailpit  ",
             smtp_username=" delivery ",
             smtp_password="SMTP_FAKE_PASSWORD",
+            smtp_starttls=True,
             smtp_timeout_seconds=30,
         )
         self.assertEqual(configured.smtp_host, "mailpit")
         self.assertEqual(configured.smtp_username, "delivery")
         self.assertIsInstance(configured.smtp_password, SecretStr)
         self.assertEqual(configured.smtp_timeout_seconds, 30)
+
+    def test_database_password_is_secret_and_round_trips_url_reserved_characters(self) -> None:
+        raw_password = "DB_FAKE@PASSWORD/#%"
+        settings = Settings(
+            _env_file=None,
+            redis_url=None,
+            database_url="postgresql+asyncpg://postgres@localhost:5432/taskhub",
+            database_password=raw_password,
+        )
+
+        self.assertEqual(make_url(settings.resolved_database_url).password, raw_password)
+        self.assertNotIn(raw_password, settings.resolved_database_url)
+        self.assertNotIn(raw_password, repr(settings))
+        alembic_config = Config()
+        alembic_config.set_main_option(
+            "sqlalchemy.url", settings.resolved_database_url.replace("%", "%%")
+        )
+        self.assertEqual(
+            make_url(alembic_config.get_main_option("sqlalchemy.url")).password,
+            raw_password,
+        )
+        self.assertIsNone(Settings(_env_file=None, database_password="").database_password)
 
     def test_blank_dotenv_password_disables_auth_without_trimming_passwords(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -69,6 +94,7 @@ class SMTPSettingsTests(unittest.TestCase):
             smtp_host="mailpit",
             smtp_username="delivery",
             smtp_password=exact_secret,
+            smtp_starttls=True,
         )
         self.assertEqual(
             configured.smtp_password.get_secret_value(), exact_secret
@@ -79,6 +105,7 @@ class SMTPSettingsTests(unittest.TestCase):
             {"smtp_username": "delivery"},
             {"smtp_password": "SMTP_FAKE_PASSWORD"},
             {"smtp_host": "mailpit", "smtp_username": "delivery"},
+            {"smtp_host": "mailpit", "smtp_username": "delivery", "smtp_password": "SMTP_FAKE_PASSWORD", "smtp_starttls": False},
             {"smtp_timeout_seconds": 0},
             {"smtp_timeout_seconds": 30.1},
             {"smtp_port": 65536},
@@ -86,9 +113,10 @@ class SMTPSettingsTests(unittest.TestCase):
             {"smtp_from_email": "not-an-email"},
         )
         for fields in invalid:
-            with self.subTest(fields=fields), self.assertRaises(ValidationError) as raised:
-                Settings(_env_file=None, redis_url=None, **fields)
-            self.assertNotIn("SMTP_FAKE_PASSWORD", str(raised.exception))
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValidationError) as raised:
+                    Settings(_env_file=None, redis_url=None, **fields)
+                self.assertNotIn("SMTP_FAKE_PASSWORD", str(raised.exception))
 
 
 class SMTPTransportTests(unittest.IsolatedAsyncioTestCase):
@@ -198,6 +226,7 @@ class BackgroundAssignmentAdapterTests(unittest.TestCase):
             asyncio.run(tasks())
 
         self.assertTrue(any("RuntimeError" in line for line in logs.output))
+        self.assertTrue(any(str(event.task_id) in line for line in logs.output))
         self.assertFalse(
             any("SMTP_FAKE_PASSWORD" in line or "PRIVATE_BODY" in line for line in logs.output)
         )

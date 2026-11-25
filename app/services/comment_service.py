@@ -7,8 +7,8 @@ from app.models.entities import Comment
 from app.models.enums import WorkspacePermission
 from app.services.task_access import TaskAccess
 from app.services.task_authorization import authorize_comment_author
-from app.services.task_transaction import task_transaction
 from app.services.task_uow import TaskManagementUnitOfWork
+from app.services.transaction import transaction_scope
 
 
 class CommentService:
@@ -19,7 +19,7 @@ class CommentService:
     async def create_comment(
         self, task_id: UUID, user_id: UUID, content: str
     ) -> Comment:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             await self._access.task(
                 task_id, user_id, WorkspacePermission.COMMENT_CREATE, write=True
             )
@@ -50,7 +50,7 @@ class CommentService:
     async def update_comment(
         self, comment_id: UUID, user_id: UUID, content: str
     ) -> Comment:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             comment = await self._access.comment(
                 comment_id, user_id, WorkspacePermission.COMMENT_UPDATE, write=True
             )
@@ -58,7 +58,7 @@ class CommentService:
             return await self._uow.comments.update(comment, content)
 
     async def delete_comment(self, comment_id: UUID, user_id: UUID) -> None:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             comment = await self._access.comment(
                 comment_id, user_id, WorkspacePermission.COMMENT_DELETE, write=True
             )

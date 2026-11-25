@@ -9,8 +9,8 @@ from app.core.exceptions import TaskLabelNotFoundError
 from app.models.entities import Label
 from app.models.enums import WorkspacePermission
 from app.services.task_access import TaskAccess
-from app.services.task_transaction import task_transaction
 from app.services.task_uow import TaskManagementUnitOfWork
+from app.services.transaction import transaction_scope
 
 LABEL_UPDATE_FIELDS = frozenset({"name", "color"})
 
@@ -23,7 +23,7 @@ class LabelService:
     async def create_label(
         self, *, project_id: UUID, user_id: UUID, name: str, color: str
     ) -> Label:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             await self._access.project(
                 project_id, user_id, WorkspacePermission.LABEL_CREATE, write=True
             )
@@ -55,7 +55,7 @@ class LabelService:
     ) -> Label:
         if changes.keys() - LABEL_UPDATE_FIELDS:
             raise ValueError("Unsupported label fields")
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             label, _ = await self._access.label(
                 label_id, user_id, WorkspacePermission.LABEL_UPDATE, write=True
             )
@@ -66,7 +66,7 @@ class LabelService:
             )
 
     async def delete_label(self, label_id: UUID, user_id: UUID) -> None:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             label, _ = await self._access.label(
                 label_id, user_id, WorkspacePermission.LABEL_DELETE, write=True
             )
@@ -90,14 +90,14 @@ class LabelService:
     async def attach_label(
         self, task_id: UUID, label_id: UUID, user_id: UUID
     ) -> None:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             await self._access.task_label(task_id, label_id, user_id)
             await self._uow.labels.attach(task_id, label_id)
 
     async def detach_label(
         self, task_id: UUID, label_id: UUID, user_id: UUID
     ) -> None:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             await self._access.task_label(task_id, label_id, user_id)
             if not await self._uow.labels.detach(task_id, label_id):
                 raise TaskLabelNotFoundError()

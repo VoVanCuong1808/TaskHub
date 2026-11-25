@@ -18,19 +18,23 @@ from app.schemas.workspace import (
 )
 
 router = APIRouter(
-    prefix="/workspaces", tags=["workspaces"],
-    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
+    prefix="/workspaces", tags=["workspaces"]
 )
 
 
-@router.post("", response_model=WorkspaceRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=WorkspaceRead,
+    status_code=status.HTTP_201_CREATED,
+    responses=error_responses(401, 422),
+)
 async def create_workspace(
     payload: WorkspaceCreate, service: WorkspaceServiceDep, user: CurrentUserDep
 ) -> WorkspaceRead:
     return WorkspaceRead.model_validate(await service.create(payload.name, user.id))
 
 
-@router.get("", response_model=Page[WorkspaceRead])
+@router.get("", response_model=Page[WorkspaceRead], responses=error_responses(401, 422))
 async def list_workspaces(
     service: WorkspaceServiceDep,
     user: CurrentUserDep,
@@ -45,14 +49,22 @@ async def list_workspaces(
     )
 
 
-@router.get("/{workspace_id}", response_model=WorkspaceRead)
+@router.get(
+    "/{workspace_id}",
+    response_model=WorkspaceRead,
+    responses=error_responses(401, 404),
+)
 async def get_workspace(
     workspace_id: UUID, service: WorkspaceServiceDep, user: CurrentUserDep
 ) -> WorkspaceRead:
     return WorkspaceRead.model_validate(await service.get(workspace_id, user.id))
 
 
-@router.patch("/{workspace_id}", response_model=WorkspaceRead)
+@router.patch(
+    "/{workspace_id}",
+    response_model=WorkspaceRead,
+    responses=error_responses(401, 403, 404, 422),
+)
 async def update_workspace(
     workspace_id: UUID,
     payload: WorkspaceUpdate,
@@ -64,7 +76,11 @@ async def update_workspace(
     )
 
 
-@router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{workspace_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(401, 403, 404),
+)
 async def delete_workspace(
     workspace_id: UUID, service: WorkspaceServiceDep, user: CurrentUserDep
 ) -> Response:
@@ -73,7 +89,9 @@ async def delete_workspace(
 
 
 @router.get(
-    "/{workspace_id}/members", response_model=Page[WorkspaceMemberRead]
+    "/{workspace_id}/members",
+    response_model=Page[WorkspaceMemberRead],
+    responses=error_responses(401, 404, 422),
 )
 async def list_workspace_members(
     workspace_id: UUID,
@@ -97,6 +115,7 @@ async def list_workspace_members(
     "/{workspace_id}/members",
     response_model=WorkspaceMemberRead,
     status_code=status.HTTP_201_CREATED,
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
 )
 async def add_workspace_member(
     workspace_id: UUID,
@@ -112,7 +131,9 @@ async def add_workspace_member(
 
 
 @router.patch(
-    "/{workspace_id}/members/{user_id}", response_model=WorkspaceMemberRead
+    "/{workspace_id}/members/{user_id}",
+    response_model=WorkspaceMemberRead,
+    responses=error_responses(401, 403, 404, 409, 422, domain_422=True),
 )
 async def update_workspace_member(
     workspace_id: UUID,
@@ -127,7 +148,9 @@ async def update_workspace_member(
 
 
 @router.delete(
-    "/{workspace_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/{workspace_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(401, 403, 404, 409),
 )
 async def remove_workspace_member(
     workspace_id: UUID,

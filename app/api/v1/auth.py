@@ -154,15 +154,16 @@ async def refresh(
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses=error_responses(401, 403, 422),
+    responses=error_responses(401, 403),
 )
 async def logout(
     _origin: OriginGuard,
     response: Response,
     service: AuthServiceDep,
     settings: SettingsDep,
-    refresh_token: Annotated[str | None, Cookie()] = None,
+    request: Request,
 ) -> Response:
+    refresh_token = request.cookies.get(COOKIE)
     try:
         if not refresh_token:
             raise AuthenticationError(AUTH_INVALID_REFRESH_TOKEN_MESSAGE)

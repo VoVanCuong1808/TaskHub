@@ -21,14 +21,21 @@ import secrets
 
 path = Path(".env")
 lines = path.read_text(encoding="utf-8").splitlines()
-prefix = "TASKHUB_JWT_SECRET_KEY="
-for index, line in enumerate(lines):
-    if line.startswith(prefix):
-        if not line[len(prefix):]:
-            lines[index] = prefix + secrets.token_urlsafe(48)
-        break
-else:
-    lines.append(prefix + secrets.token_urlsafe(48))
+def get_value(name):
+    prefix = name + "="
+    return next((line[len(prefix):] for line in lines if line.startswith(prefix)), "")
+
+def set_value(name, value):
+    prefix = name + "="
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = prefix + value
+            return
+    lines.append(prefix + value)
+
+for name in ("TASKHUB_JWT_SECRET_KEY", "TASKHUB_POSTGRES_PASSWORD"):
+    if not get_value(name):
+        set_value(name, secrets.token_urlsafe(48))
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 '@
 $script | python -
@@ -36,8 +43,14 @@ docker compose -f compose.yaml up --build -d --wait
 ```
 
 Compose starts the API, PostgreSQL, Redis and local Mailpit capture service.
-The setup preserves an existing `.env` and signing key. If the key is blank or
-missing, it writes a private random key directly to `.env` without printing it.
+The setup preserves an existing `.env`, signing key, and Postgres password. If
+either secret is blank or missing, it writes a random value directly to `.env`
+without printing it. Compose passes the Postgres password separately as a
+`SecretStr`; SQLAlchemy safely encodes reserved URL characters when building its
+connection URL, so passwords containing `@`, `/`, `#`, or `%` work unchanged.
+For a manually chosen value, quote it in `.env` if Compose could parse any
+characters as comments or whitespace; the same raw value is passed to Postgres
+and URL encoding happens inside the application.
 The app is at `http://127.0.0.1:8000`; Mailpit's inbox is at
 `http://127.0.0.1:8025`. If port 8000 is occupied, set a free host port for this
 PowerShell session before `docker compose`, for example:
@@ -52,6 +65,9 @@ Khi đổi port, thay `8000` bằng port đã chọn ở các URL API/health/doc
 PostgreSQL and Redis in this stack are private to its Compose network. The
 PostgreSQL data uses a dedicated durable `taskhub-stack` volume; it does not
 reuse the host-development database volume on port 5433.
+`TASKHUB_POSTGRES_PASSWORD` initializes new Postgres volumes only. It does not
+change the password stored in an existing volume; do not reset or remove a volume
+to rotate it. Keep the `.env` password aligned with the database's current user.
 
 ### Chạy ứng dụng trên host
 
@@ -141,7 +157,12 @@ OWNER không thể bị đổi role hoặc xóa. Mọi endpoint cần Bearer acc
 Project API: `POST/GET /api/v1/workspaces/{workspace_id}/projects` tạo và liệt
 kê project trong workspace; `GET/PATCH/DELETE /api/v1/projects/{project_id}`
 đọc, cập nhật, archive/restore bằng `status` (`active`/`archived`) hoặc xóa.
-OWNER/EDITOR được ghi, VIEWER chỉ đọc. Workspace của project không thể đổi.
+Project mới luôn ở trạng thái `active`; OWNER/EDITOR có thể tạo, sửa và
+archive/restore, chỉ OWNER mới có thể xóa vĩnh viễn vì thao tác này cascade xóa
+task, label, liên kết và comment. VIEWER chỉ đọc. Workspace của project không
+thể đổi. Nested project create/list trả lỗi workspace nếu workspace không tồn
+tại hoặc actor không phải thành viên; flat project routes tiếp tục ẩn resource
+bằng lỗi project.
 
 Browser client tối giản nằm ở `examples/auth-client.js`. Client chỉ lưu access
 token ngắn hạn trong `localStorage` dưới key `taskhub_access_token`; JavaScript
@@ -205,9 +226,10 @@ Pagination dùng `page` bắt đầu từ 1 và `limit` mặc định 20 (1–20
 query `offset` đã bị loại bỏ và trả 422. Alias ẩn `/tasks` dùng cùng `q`, các
 filter và pagination.
 
-Khi tạo task có `assignee_id`, hoặc đổi assignee sang một user khác, API xếp
-lịch email sau khi transaction đã commit. Giữ nguyên assignee, bỏ assignee hoặc
-task không có assignee thì không gửi email trùng. Mailpit trong Compose chỉ thu
+Khi tạo task có `assignee_id` khác người tạo, hoặc đổi assignee sang user khác
+người thao tác, API xếp lịch email sau khi transaction đã commit. Tự giao task
+cho chính mình, giữ nguyên assignee, bỏ assignee hoặc task không có assignee thì
+không gửi email. Mailpit trong Compose chỉ thu
 email local, không relay ra ngoài. Gửi email chạy best-effort trong process của
 API; lỗi SMTP không làm hỏng task đã commit, nhưng email chưa xử lý có thể mất
 nếu process dừng đột ngột. Đây không phải hàng đợi bền vững và không cam kết
@@ -300,6 +322,8 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`; các giá trị local 
 | `TASKHUB_HOST`         | `127.0.0.1` |
 | `TASKHUB_PORT`         | `8000`      |
 | `TASKHUB_DATABASE_URL` | `postgresql+asyncpg://postgres:taskhub@127.0.0.1:5433/taskhub` |
+| `TASKHUB_DATABASE_PASSWORD` | optional for host development; Compose requires a private Postgres password |
+| `TASKHUB_POSTGRES_PASSWORD` | required by full Compose; setup creates and stores a random value if blank |
 | `TASKHUB_DATABASE_ECHO` | `false` |
 | `TASKHUB_REDIS_URL` | `redis://127.0.0.1:6379/0` |
 | `TASKHUB_JWT_SECRET_KEY` | bắt buộc, tối thiểu 32 bytes |
@@ -316,8 +340,9 @@ Mọi biến môi trường dùng tiền tố `TASKHUB_`; các giá trị local 
 | `TASKHUB_SMTP_STARTTLS` | `false` (Mailpit local không cần TLS) |
 | `TASKHUB_SMTP_TIMEOUT_SECONDS` | `5` (lớn hơn 0 và tối đa 30) |
 
-SMTP username và password phải cùng được đặt hoặc cùng để trống. SMTP host trống
-vô hiệu hoá adapter email. API docs mô tả Bearer authentication và các response
+SMTP username và password phải cùng được đặt hoặc cùng để trống; nếu có thông tin
+xác thực thì bắt buộc bật `TASKHUB_SMTP_STARTTLS=true`. SMTP host trống vô hiệu
+hoá adapter email. API docs mô tả Bearer authentication và các response
 lỗi; lỗi nghiệp vụ dùng `{ "detail": "..." }`, validation dùng `detail` dạng
 danh sách. Full Compose chỉ gửi tới Mailpit local, không relay email ra ngoài.
 

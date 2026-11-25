@@ -23,7 +23,7 @@ class ProjectAPIServiceStub:
         self.project.workspace_id = kwargs["workspace_id"]
         self.project.name = kwargs["name"]
         self.project.description = kwargs["description"]
-        self.project.status = kwargs["status"]
+        self.project.status = ProjectStatus.ACTIVE
         return self.project
 
     async def list(self, **kwargs):
@@ -111,6 +111,7 @@ class ProjectAPITests(unittest.TestCase):
             {"name": "valid", "description": "x" * 2001},
             {"name": "valid", "description": "bad\x00description"},
             {"name": "valid", "workspace_id": str(uuid4())},
+            {"name": "valid", "status": "archived"},
             {"name": "valid", "status": "unknown"},
             {"name": None},
         ):

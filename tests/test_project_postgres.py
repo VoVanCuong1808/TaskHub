@@ -247,7 +247,10 @@ class ProjectPostgreSQLTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(comment_response.status_code, 201, comment_response.text)
             comment_id = UUID(comment_response.json()["id"])
-            deleted = client.delete(endpoint, headers=editor_headers)
+            editor_delete = client.delete(endpoint, headers=editor_headers)
+            self.assertEqual(editor_delete.status_code, 403, editor_delete.text)
+            self.assertEqual(client.get(endpoint, headers=owner_headers).status_code, 200)
+            deleted = client.delete(endpoint, headers=owner_headers)
             self.assertEqual(deleted.status_code, 204, deleted.text)
             self.assertEqual(client.get(endpoint, headers=owner_headers).status_code, 404)
 

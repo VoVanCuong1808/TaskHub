@@ -29,7 +29,6 @@ WORKSPACE_ROLE_PERMISSIONS: Final = MappingProxyType(
                 WorkspacePermission.PROJECT_READ,
                 WorkspacePermission.PROJECT_CREATE,
                 WorkspacePermission.PROJECT_UPDATE,
-                WorkspacePermission.PROJECT_DELETE,
             }
         ),
         WorkspaceRole.VIEWER: frozenset(

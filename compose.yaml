@@ -4,7 +4,8 @@ x-application: &application
   image: taskhub:local
   build: .
   environment:
-    TASKHUB_DATABASE_URL: postgresql+asyncpg://postgres:taskhub@postgres:5432/taskhub
+    TASKHUB_DATABASE_URL: postgresql+asyncpg://postgres@postgres:5432/taskhub
+    TASKHUB_DATABASE_PASSWORD: ${TASKHUB_POSTGRES_PASSWORD:?Set a private Postgres password in .env}
     TASKHUB_REDIS_URL: redis://redis:6379/0
     TASKHUB_JWT_SECRET_KEY: ${TASKHUB_JWT_SECRET_KEY:?Set a private signing key in .env}
     TASKHUB_ENVIRONMENT: local
@@ -20,7 +21,7 @@ services:
     environment:
       POSTGRES_DB: taskhub
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: taskhub
+      POSTGRES_PASSWORD: ${TASKHUB_POSTGRES_PASSWORD:?Set a private Postgres password in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 from app.core.constants import (
     SMTP_DEFAULT_PORT,
@@ -44,6 +45,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     database_url: str = "postgresql+asyncpg://postgres:taskhub@localhost:5432/taskhub"
+    database_password: SecretStr | None = None
     database_echo: bool = False
     redis_url: RedisDsn | None = None
     smtp_host: str | None = Field(default=None, max_length=255)
@@ -62,10 +64,24 @@ class Settings(BaseSettings):
     refresh_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     frontend_origins: list[str] = Field(default_factory=list)
 
+    @property
+    def resolved_database_url(self) -> str:
+        """Build the engine URL while safely encoding a separately supplied secret."""
+        if self.database_password is None:
+            return self.database_url
+        return make_url(self.database_url).set(
+            password=self.database_password.get_secret_value()
+        ).render_as_string(hide_password=False)
+
     @field_validator("redis_url", mode="before")
     @classmethod
     def empty_redis_url_disables_cache(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("database_password", mode="before")
+    @classmethod
+    def blank_database_password_is_unset(cls, value: object) -> object:
+        return None if value == "" else value
 
     @field_validator("smtp_host", mode="before")
     @classmethod
@@ -144,6 +160,8 @@ class Settings(BaseSettings):
             raise ValueError("SMTP username and password must be configured together")
         if self.smtp_username is not None and self.smtp_host is None:
             raise ValueError("SMTP credentials require an SMTP host")
+        if self.smtp_username is not None and not self.smtp_starttls:
+            raise ValueError("SMTP credentials require STARTTLS")
         if self.refresh_cookie_samesite == "none" and not self.refresh_cookie_secure:
             raise ValueError("SameSite=None requires a Secure refresh cookie")
         if (
