@@ -1,0 +1,80 @@
+name: taskhub-stack
+
+x-application: &application
+  image: taskhub:local
+  build: .
+  environment:
+    TASKHUB_DATABASE_URL: postgresql+asyncpg://postgres@postgres:5432/taskhub
+    TASKHUB_DATABASE_PASSWORD: ${TASKHUB_POSTGRES_PASSWORD:?Set a private Postgres password in .env}
+    TASKHUB_REDIS_URL: redis://redis:6379/0
+    TASKHUB_JWT_SECRET_KEY: ${TASKHUB_JWT_SECRET_KEY:?Set a private signing key in .env}
+    TASKHUB_ENVIRONMENT: local
+    TASKHUB_REFRESH_COOKIE_SECURE: "false"
+    TASKHUB_SMTP_HOST: mailpit
+    TASKHUB_SMTP_PORT: "1025"
+    TASKHUB_SMTP_FROM_EMAIL: no-reply@example.com
+    TASKHUB_SMTP_TIMEOUT_SECONDS: "5"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: taskhub
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${TASKHUB_POSTGRES_PASSWORD:?Set a private Postgres password in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d taskhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *application
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    <<: *application
+    ports:
+      - "127.0.0.1:${TASKHUB_HTTP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:

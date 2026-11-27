@@ -50,6 +50,10 @@ class WorkspacePermission(str, Enum):
     MEMBER_INVITE = "workspace-member:invite"
     MEMBER_UPDATE = "workspace-member:update"
     MEMBER_REMOVE = "workspace-member:remove"
+    PROJECT_READ = "project:read"
+    PROJECT_CREATE = "project:create"
+    PROJECT_UPDATE = "project:update"
+    PROJECT_DELETE = "project:delete"
 
 
 class ProjectStatus(str, Enum):

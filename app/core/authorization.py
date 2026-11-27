@@ -26,6 +26,9 @@ WORKSPACE_ROLE_PERMISSIONS: Final = MappingProxyType(
                 WorkspacePermission.COMMENT_DELETE,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
+                WorkspacePermission.PROJECT_READ,
+                WorkspacePermission.PROJECT_CREATE,
+                WorkspacePermission.PROJECT_UPDATE,
             }
         ),
         WorkspaceRole.VIEWER: frozenset(
@@ -35,6 +38,7 @@ WORKSPACE_ROLE_PERMISSIONS: Final = MappingProxyType(
                 WorkspacePermission.COMMENT_READ,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
+                WorkspacePermission.PROJECT_READ,
             }
         ),
     }
@@ -56,6 +60,9 @@ WORKSPACE_WRITE_PERMISSIONS: Final = frozenset(
         WorkspacePermission.MEMBER_INVITE,
         WorkspacePermission.MEMBER_UPDATE,
         WorkspacePermission.MEMBER_REMOVE,
+        WorkspacePermission.PROJECT_CREATE,
+        WorkspacePermission.PROJECT_UPDATE,
+        WorkspacePermission.PROJECT_DELETE,
     }
 )
 

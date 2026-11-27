@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import builtins
 from typing import Protocol
 from uuid import UUID
 
 from app.models.entities import (
     Comment,
     Label,
-    Project,
     User,
     Workspace,
     WorkspaceMember,
 )
 from app.models.enums import TaskPriority, TaskStatus
 from app.models.task import Task
+from app.services.project_uow import ProjectStore
 
 
 class TaskStore(Protocol):
@@ -39,12 +40,6 @@ class TaskStore(Protocol):
     async def save(self, task: Task) -> Task | None: ...
 
     async def delete(self, task_id: UUID) -> None: ...
-
-
-class ProjectStore(Protocol):
-    async def get(self, project_id: UUID) -> Project | None: ...
-
-    async def get_for_share(self, project_id: UUID) -> Project | None: ...
 
 
 class TaskWorkspaceStore(Protocol):
@@ -74,7 +69,7 @@ class LabelStore(Protocol):
 
     async def list_for_task(
         self, task_id: UUID, *, offset: int, limit: int
-    ) -> tuple[list[Label], int]: ...
+    ) -> tuple[builtins.list[Label], int]: ...
 
     async def get(self, label_id: UUID) -> Label | None: ...
 

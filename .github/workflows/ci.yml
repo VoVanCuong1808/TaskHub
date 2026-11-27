@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: taskhub_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: taskhub-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d taskhub_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TASKHUB_TEST_DATABASE_URL: postgresql+asyncpg://postgres:taskhub-ci-only@127.0.0.1:5432/taskhub_test
+      TASKHUB_TEST_REDIS_URL: redis://127.0.0.1:6380/0
+      TASKHUB_JWT_SECRET_KEY: ci-only-signing-key-with-at-least-thirty-two-bytes
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check app tests
+      - run: uv run mypy app
+      - name: Run unittest suite and reject skips
+        run: |
+          uv run python - <<'PY'
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.testsRun == 0 or not result.wasSuccessful() or result.skipped:
+              sys.exit(1)
+          PY

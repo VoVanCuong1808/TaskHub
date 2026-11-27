@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Mapping
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from app.core.constants import DEFAULT_PAGE_LIMIT
@@ -10,9 +11,10 @@ from app.core.exceptions import TaskNotFoundError
 from app.models.enums import TaskPriority, TaskStatus, WorkspacePermission
 from app.models.task import Task
 from app.services.task_access import TaskAccess
+from app.services.task_assignment import TaskAssignmentEvent, TaskAssignmentNotifier
 from app.services.task_list_cache import TaskListCache, task_list_query_digest
-from app.services.task_transaction import task_transaction
 from app.services.task_uow import TaskManagementUnitOfWork
+from app.services.transaction import transaction_scope
 
 TASK_UPDATE_FIELDS = frozenset(
     {"title", "description", "status", "priority", "due_date", "assignee_id"}
@@ -22,11 +24,15 @@ logger = logging.getLogger("taskhub")
 
 class TaskService:
     def __init__(
-        self, uow: TaskManagementUnitOfWork, cache: TaskListCache | None = None
+        self,
+        uow: TaskManagementUnitOfWork,
+        cache: TaskListCache | None = None,
+        assignment_notifier: TaskAssignmentNotifier | None = None,
     ) -> None:
         self._uow = uow
         self._access = TaskAccess(uow)
         self._cache = cache
+        self._assignment_notifier = assignment_notifier
 
     async def create(
         self,
@@ -40,12 +46,14 @@ class TaskService:
         due_date: datetime | None = None,
         assignee_id: UUID | None = None,
     ) -> Task:
-        async with task_transaction(self._uow):
+        assignment_event = None
+        async with transaction_scope(self._uow, "Task transaction failed"):
             grant = await self._access.project(
                 project_id, user_id, WorkspacePermission.TASK_CREATE, write=True
             )
+            assignee = None
             if assignee_id is not None:
-                await self._access.assignee(grant.workspace, assignee_id)
+                assignee = await self._access.assignee(grant.workspace, assignee_id)
             created = await self._uow.tasks.add(
                 Task(
                     project_id=project_id,
@@ -58,6 +66,13 @@ class TaskService:
                     assignee_id=assignee_id,
                 )
             )
+            if assignee is not None and assignee.id != user_id:
+                assignment_event = TaskAssignmentEvent(
+                    task_id=created.id,
+                    task_title=created.title,
+                    recipient_email=assignee.email,
+                )
+        await self._schedule_assignment(assignment_event)
         await self._rotate_list_cache(project_id)
         return created
 
@@ -128,24 +143,38 @@ class TaskService:
     ) -> Task:
         if changes.keys() - TASK_UPDATE_FIELDS:
             raise ValueError("Unsupported task fields")
-        async with task_transaction(self._uow):
+        assignment_event = None
+        async with transaction_scope(self._uow, "Task transaction failed"):
             task, grant = await self._access.task(
                 task_id, user_id, WorkspacePermission.TASK_UPDATE, write=True
             )
+            previous_assignee_id = task.assignee_id
             assignee_id = changes.get("assignee_id")
+            assignee = None
             if "assignee_id" in changes and assignee_id is not None:
-                await self._access.assignee(grant.workspace, assignee_id)
+                assignee = await self._access.assignee(grant.workspace, cast(UUID, assignee_id))
             for attribute, value in changes.items():
                 setattr(task, attribute, value)
             task.touch()
             saved = await self._uow.tasks.save(task)
             if saved is None:
                 raise TaskNotFoundError(task_id)
+            if (
+                assignee is not None
+                and assignee.id != previous_assignee_id
+                and assignee.id != user_id
+            ):
+                assignment_event = TaskAssignmentEvent(
+                    task_id=saved.id,
+                    task_title=saved.title,
+                    recipient_email=assignee.email,
+                )
+        await self._schedule_assignment(assignment_event)
         await self._rotate_list_cache(task.project_id)
         return saved
 
     async def delete(self, task_id: UUID, user_id: UUID) -> None:
-        async with task_transaction(self._uow):
+        async with transaction_scope(self._uow, "Task transaction failed"):
             task, _ = await self._access.task(
                 task_id, user_id, WorkspacePermission.TASK_DELETE, write=True
             )
@@ -160,4 +189,18 @@ class TaskService:
         except Exception:
             logger.warning(
                 "Task-list cache invalidation failed after commit", exc_info=True
+            )
+
+    async def _schedule_assignment(
+        self, event: TaskAssignmentEvent | None
+    ) -> None:
+        if event is None or self._assignment_notifier is None:
+            return
+        try:
+            await self._assignment_notifier.schedule(event)
+        except Exception as exc:  # noqa: BLE001 - scheduling is post-commit best effort
+            logger.warning(
+                "Task assignment notification scheduling failed for task %s (%s)",
+                event.task_id,
+                type(exc).__name__,
             )

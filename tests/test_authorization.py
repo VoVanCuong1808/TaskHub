@@ -58,6 +58,9 @@ class WorkspacePermissionTests(unittest.TestCase):
                     WorkspacePermission.COMMENT_DELETE,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
+                    WorkspacePermission.PROJECT_READ,
+                    WorkspacePermission.PROJECT_CREATE,
+                    WorkspacePermission.PROJECT_UPDATE,
                 }
             ),
             WorkspaceRole.VIEWER: frozenset(
@@ -67,6 +70,7 @@ class WorkspacePermissionTests(unittest.TestCase):
                     WorkspacePermission.COMMENT_READ,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
+                    WorkspacePermission.PROJECT_READ,
                 }
             ),
         }
@@ -96,6 +100,7 @@ class WorkspacePermissionTests(unittest.TestCase):
                 WorkspacePermission.COMMENT_READ,
                 WorkspacePermission.WORKSPACE_READ,
                 WorkspacePermission.MEMBER_READ,
+                WorkspacePermission.PROJECT_READ,
             },
         )
         read_permissions = frozenset(WorkspacePermission) - WORKSPACE_WRITE_PERMISSIONS
@@ -108,6 +113,7 @@ class WorkspacePermissionTests(unittest.TestCase):
                     WorkspacePermission.COMMENT_READ,
                     WorkspacePermission.WORKSPACE_READ,
                     WorkspacePermission.MEMBER_READ,
+                    WorkspacePermission.PROJECT_READ,
                 }
             ),
         )
